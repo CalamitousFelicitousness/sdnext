@@ -35,12 +35,12 @@ async def get_queue_lock() -> asyncio.Lock:
 async def get_redis_client():
     """
     Get Redis client instance.
-    
+
     Returns None if Redis is not enabled.
     """
     if not config.redis_enabled:
         return None
-    
+
     global _redis_client
     if _redis_client is None:
         # TODO: Initialize Redis client

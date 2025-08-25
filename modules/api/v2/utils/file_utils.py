@@ -46,15 +46,21 @@ def sanitize_filename(name: str, *, allow_unicode: bool = False) -> str:
     return name or f"file_{secrets.token_hex(4)}"
 
 
-def guess_mime_type(path_or_name: Union[str, Path], default: str = "application/octet-stream") -> str:
+def guess_mime_type(
+    path_or_name: Union[str, Path], default: str = "application/octet-stream"
+) -> str:
     """Best-effort MIME detection using stdlib only (why: no heavy deps)."""
     mtype, _ = mimetypes.guess_type(str(path_or_name))
     return mtype or default
 
 
-def create_temp_file(*, prefix: str = "sdnext_", suffix: str = "", dir: Optional[Union[str, Path]] = None) -> Path:
+def create_temp_file(
+    *, prefix: str = "sdnext_", suffix: str = "", dir: Optional[Union[str, Path]] = None
+) -> Path:
     """Create a closed temp file and return its Path (why: aiofiles needs to open)."""
-    fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=str(dir) if dir else None)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=prefix, suffix=suffix, dir=str(dir) if dir else None
+    )
     os.close(fd)
     return Path(temp_path)
 
@@ -78,7 +84,9 @@ def decode_base64_to_bytes(base64_str: str) -> bytes:
         return base64.b64decode(s, validate=False)
 
 
-def encode_bytes_to_base64(data: bytes, *, mime_type: Optional[str] = None, as_data_url: bool = False) -> str:
+def encode_bytes_to_base64(
+    data: bytes, *, mime_type: Optional[str] = None, as_data_url: bool = False
+) -> str:
     """Encode bytes to base64; optionally as data URL."""
     b64 = base64.b64encode(data).decode("utf-8")
     if as_data_url or mime_type:
@@ -87,7 +95,9 @@ def encode_bytes_to_base64(data: bytes, *, mime_type: Optional[str] = None, as_d
     return b64
 
 
-async def write_bytes(data: bytes, dest: Union[str, Path], *, overwrite: bool = False) -> int:
+async def write_bytes(
+    data: bytes, dest: Union[str, Path], *, overwrite: bool = False
+) -> int:
     """Write bytes asynchronously; create parents; guard overwrite."""
     path = Path(dest)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +114,9 @@ async def read_bytes(path: Union[str, Path]) -> bytes:
         return await f.read()
 
 
-async def iter_file(path: Union[str, Path], *, chunk_size: int = 65536) -> AsyncIterator[bytes]:
+async def iter_file(
+    path: Union[str, Path], *, chunk_size: int = 65536
+) -> AsyncIterator[bytes]:
     """Async file iterator (why: efficient http streaming)."""
     path = Path(path)
     async with aiofiles.open(path, "rb") as f:
@@ -223,14 +235,16 @@ async def _read_all(part: Any) -> Tuple[bytes, Optional[str]]:
         return b, None
     # UploadFile-like
     data = None
-    ctype = getattr(part, "content_type", None) or getattr(getattr(part, "headers", {}), "get", lambda *_: None)("Content-Type")
+    ctype = getattr(part, "content_type", None) or getattr(
+        getattr(part, "headers", {}), "get", lambda *_: None
+    )("Content-Type")
     read_fn = getattr(part, "read", None)
     if asyncio.iscoroutinefunction(read_fn):
         data = await read_fn()
     elif callable(read_fn):
         data = read_fn()
     elif hasattr(part, "file"):  # Starlette UploadFile .file (SpooledTemporaryFile)
-        fobj = getattr(part, "file")
+        fobj = part.file
         data = fobj.read() if callable(getattr(fobj, "read", None)) else None
     if data is None:
         raise TypeError("Unsupported upload part type")
@@ -252,7 +266,12 @@ async def handle_upload(
     dest.mkdir(parents=True, exist_ok=True)
 
     # resolve target filename
-    inferred_name = getattr(part, "filename", None) or (part[0] if isinstance(part, tuple) and part else None) or filename or f"upload_{secrets.token_hex(4)}"
+    inferred_name = (
+        getattr(part, "filename", None)
+        or (part[0] if isinstance(part, tuple) and part else None)
+        or filename
+        or f"upload_{secrets.token_hex(4)}"
+    )
     safe_name = sanitize_filename(str(inferred_name))
     target = dest / safe_name
     if target.exists() and not overwrite:
@@ -291,7 +310,9 @@ def _extract_disposition_params(header: str) -> Dict[str, str]:
 
 
 def _ensure_bytes(x: Union[str, bytes]) -> bytes:
-    return x if isinstance(x, (bytes, bytearray, memoryview)) else str(x).encode("utf-8")
+    return (
+        x if isinstance(x, (bytes, bytearray, memoryview)) else str(x).encode("utf-8")
+    )
 
 
 def build_multipart(
@@ -369,7 +390,9 @@ def parse_multipart(
         except ValueError:
             continue
         headers = header_blob.decode("utf-8", "ignore").split("\r\n")
-        disp = next((h for h in headers if h.lower().startswith("content-disposition:")), "")
+        disp = next(
+            (h for h in headers if h.lower().startswith("content-disposition:")), ""
+        )
         if not disp:
             continue
         params = _extract_disposition_params(disp)
