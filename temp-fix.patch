@@ -1,0 +1,600 @@
+# Create directory structure
+git apply --whitespace=fix <<'EOF'
+diff --git a/modules/api/v2/__init__.py b/modules/api/v2/__init__.py
+new file mode 100644
+index 0000000..8b6e1f5
+--- /dev/null
++++ b/modules/api/v2/__init__.py
+@@ -0,0 +1,23 @@
++"""
++SDNext v2 API Package
++
++A modern, async-first API implementation for SDNext that provides:
++- WebSocket support for real-time updates
++- Server-sent events for progress streaming
++- Enhanced queue management with Redis support
++- Multi-tier caching
++- Improved performance and scalability
++
++This package is designed to be UI-agnostic and does not depend on Gradio.
++"""
++
++from .api import ApiV2
++
++__version__ = "2.0.0"
++__all__ = [
++    "ApiV2",
++]
++
++# Version compatibility check
++import sys
++if sys.version_info < (3, 10):
++    raise RuntimeError("SDNext v2 API requires Python 3.10 or higher")
+diff --git a/modules/api/v2/api.py b/modules/api/v2/api.py
+new file mode 100644
+index 0000000..f8c5e9e
+--- /dev/null
++++ b/modules/api/v2/api.py
+@@ -0,0 +1,102 @@
++"""
++Main ApiV2 class for SDNext v2 API
++
++This class manages the FastAPI application setup, route registration,
++and lifecycle management for the v2 API endpoints.
++"""
++
++import asyncio
++import logging
++from typing import Optional
++from contextlib import asynccontextmanager
++
++from fastapi import FastAPI, APIRouter
++from fastapi.middleware.cors import CORSMiddleware
++from fastapi.middleware.gzip import GZipMiddleware
++
++from modules.shared import log
++
++# Import routers (to be implemented)
++# from .routers import system, generation, canvas, models, queue
++# from .websockets import ConnectionManager
++# from .middleware import AuthMiddleware, RateLimitMiddleware
++
++
++class ApiV2:
++    """
++    Main API v2 class that manages FastAPI application and routes.
++    
++    This class provides:
++    - Async-first design with proper lifecycle management
++    - WebSocket and SSE support for real-time updates
++    - Enhanced queue management
++    - Multi-tier caching
++    - Proper dependency injection
++    """
++    
++    def __init__(self, app: FastAPI, queue_lock: asyncio.Lock):
++        """
++        Initialize the ApiV2 instance.
++        
++        Args:
++            app: The main FastAPI application instance
++            queue_lock: Async lock for queue management
++        """
++        self.app = app
++        self.queue_lock = queue_lock
++        self.router = APIRouter(prefix="/sdapi/v2")
++        # self.connection_manager = ConnectionManager()
++        self.logger = logging.getLogger(__name__)
++        
++        # Store initialization state
++        self._initialized = False
++        
++    async def startup(self):
++        """
++        Async startup handler for initializing resources.
++        
++        This method:
++        - Initializes Redis connection for distributed queue
++        - Sets up background task workers
++        - Initializes cache managers
++        - Prepares resource pools
++        """
++        if self._initialized:
++            return
++            
++        self.logger.info("Starting SDNext v2 API...")
++        
++        # TODO: Initialize Redis connection
++        # TODO: Set up background task workers
++        # TODO: Initialize cache managers
++        # TODO: Set up resource pools
++        
++        self._initialized = True
++        self.logger.info("SDNext v2 API started successfully")
++        
++    async def shutdown(self):
++        """
++        Async shutdown handler for cleaning up resources.
++        """
++        self.logger.info("Shutting down SDNext v2 API...")
++        
++        # TODO: Close Redis connections
++        # TODO: Cancel background tasks
++        # TODO: Cleanup resource pools
++        
++        self._initialized = False
++        self.logger.info("SDNext v2 API shutdown complete")
++        
++    def register(self):
++        """
++        Register all v2 API routes and middleware.
++        
++        This method:
++        - Registers all domain routers
++        - Sets up middleware stack
++        - Configures CORS settings
++        - Adds WebSocket endpoints
++        """
++        self.logger.info("Registering SDNext v2 API routes...")
++        
++        # TODO: Register domain routers
++        # TODO: Add middleware
++        # TODO: Configure CORS
++        
++        # Register the main v2 router with the app
++        self.app.include_router(self.router)
++        self.logger.info("SDNext v2 API routes registered")
+diff --git a/modules/api/v2/routers/__init__.py b/modules/api/v2/routers/__init__.py
+new file mode 100644
+index 0000000..8733c84
+--- /dev/null
++++ b/modules/api/v2/routers/__init__.py
+@@ -0,0 +1,10 @@
++"""
++API v2 Routers Package
++
++This package contains all domain-specific routers for the v2 API:
++- System: System information and control endpoints
++- Generation: Image generation endpoints (txt2img, img2img, etc.)
++- Canvas: Canvas operations for react-konva integration
++- Models: Model management and information
++- Queue: Queue management and task status
++"""
+diff --git a/modules/api/v2/models/__init__.py b/modules/api/v2/models/__init__.py
+new file mode 100644
+index 0000000..7e9e56f
+--- /dev/null
++++ b/modules/api/v2/models/__init__.py
+@@ -0,0 +1,11 @@
++"""
++API v2 Data Models Package
++
++This package contains Pydantic models for request/response validation:
++- Generation models (txt2img, img2img, control, etc.)
++- System models (info, memory, health)
++- Canvas models (layers, masks, compositing)
++- Queue models (task status, progress)
++- Asset models (storage, optimization)
++- Common models (shared fields, base classes)
++"""
+diff --git a/modules/api/v2/middleware/__init__.py b/modules/api/v2/middleware/__init__.py
+new file mode 100644
+index 0000000..cf3e5ce
+--- /dev/null
++++ b/modules/api/v2/middleware/__init__.py
+@@ -0,0 +1,10 @@
++"""
++API v2 Middleware Package
++
++This package contains custom middleware for the v2 API:
++- Authentication middleware (JWT, API keys)
++- Rate limiting middleware
++- Request/response logging
++- Error handling
++- Performance monitoring
++"""
+diff --git a/modules/api/v2/services/__init__.py b/modules/api/v2/services/__init__.py
+new file mode 100644
+index 0000000..dbb889f
+--- /dev/null
++++ b/modules/api/v2/services/__init__.py
+@@ -0,0 +1,13 @@
++"""
++API v2 Services Package
++
++This package contains business logic services:
++- Queue service (enhanced queue management)
++- Cache service (multi-tier caching)
++- Storage service (tiered storage system)
++- Generation service (image generation logic)
++- Model service (model loading and management)
++- Canvas service (canvas operations)
++- Optimization service (image format optimization)
++- Monitoring service (metrics and tracing)
++"""
+diff --git a/modules/api/v2/utils/__init__.py b/modules/api/v2/utils/__init__.py
+new file mode 100644
+index 0000000..dbb0ced
+--- /dev/null
++++ b/modules/api/v2/utils/__init__.py
+@@ -0,0 +1,11 @@
++"""
++API v2 Utilities Package
++
++This package contains utility functions:
++- File utilities (base64 encoding/decoding, file operations)
++- Image utilities (format conversion, optimization)
++- Validation utilities (parameter validation, sanitization)
++- Async utilities (async helpers, context managers)
++- Security utilities (token generation, hashing)
++- Performance utilities (profiling, timing)
++"""
+diff --git a/modules/api/v2/utils/file_utils.py b/modules/api/v2/utils/file_utils.py
+new file mode 100644
+index 0000000..e19a2d6
+--- /dev/null
++++ b/modules/api/v2/utils/file_utils.py
+@@ -0,0 +1,115 @@
++"""
++File utilities for API v2
++
++This module provides async-aware file operations to replace
++Gradio dependencies, particularly gradio_client.utils functions.
++"""
++
++import base64
++import tempfile
++import hashlib
++import mimetypes
++from pathlib import Path
++from typing import Optional, Union, Tuple
++import aiofiles
++import asyncio
++from io import BytesIO
++
++
++async def decode_base64_to_file(
++    base64_str: str,
++    file_path: Optional[Path] = None,
++    prefix: str = "sdnext_",
++    suffix: str = ""
++) -> Path:
++    """
++    Decode base64 string to file asynchronously.
++    
++    Replacement for gradio_client.utils.decode_base64_to_file
++    
++    Args:
++        base64_str: Base64 encoded string
++        file_path: Optional target file path
++        prefix: Prefix for temporary file name
++        suffix: Suffix for temporary file name
++        
++    Returns:
++        Path to the created file
++        
++    Raises:
++        ValueError: If base64 string is invalid
++    """
++    try:
++        # Handle data URLs (e.g., "data:image/png;base64,...")
++        if "," in base64_str and base64_str.startswith("data:"):
++            base64_str = base64_str.split(",", 1)[1]
++        
++        # Decode base64
++        data = base64.b64decode(base64_str, validate=True)
++        
++        # Create file path if not provided
++        if file_path is None:
++            fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
++            file_path = Path(temp_path)
++            # Close the file descriptor as aiofiles will open it
++            import os
++            os.close(fd)
++        
++        # Write data asynchronously
++        async with aiofiles.open(file_path, 'wb') as f:
++            await f.write(data)
++        
++        return file_path
++        
++    except Exception as e:
++        raise ValueError(f"Failed to decode base64 to file: {e}")
++
++
++async def encode_file_to_base64(
++    file_path: Union[str, Path],
++    mime_type: Optional[str] = None
++) -> str:
++    """
++    Encode file to base64 string asynchronously.
++    
++    Args:
++        file_path: Path to the file
++        mime_type: Optional MIME type for data URL
++        
++    Returns:
++        Base64 encoded string, optionally as data URL
++    """
++    file_path = Path(file_path)
++    
++    if not file_path.exists():
++        raise FileNotFoundError(f"File not found: {file_path}")
++    
++    async with aiofiles.open(file_path, 'rb') as f:
++        data = await f.read()
++    
++    base64_str = base64.b64encode(data).decode('utf-8')
++    
++    # Add data URL prefix if mime_type is provided
++    if mime_type:
++        return f"data:{mime_type};base64,{base64_str}"
++    
++    return base64_str
++
++
++async def get_file_hash(
++    file_path: Union[str, Path],
++    algorithm: str = "sha256"
++) -> str:
++    """
++    Calculate file hash asynchronously.
++    
++    Args:
++        file_path: Path to the file
++        algorithm: Hash algorithm to use
++        
++    Returns:
++        Hex digest of the file hash
++    """
++    file_path = Path(file_path)
++    hasher = hashlib.new(algorithm)
++    
++    async with aiofiles.open(file_path, 'rb') as f:
++        while chunk := await f.read(8192):
++            hasher.update(chunk)
++    
++    return hasher.hexdigest()
+diff --git a/modules/api/v2/websockets/__init__.py b/modules/api/v2/websockets/__init__.py
+new file mode 100644
+index 0000000..8e926f0
+--- /dev/null
++++ b/modules/api/v2/websockets/__init__.py
+@@ -0,0 +1,8 @@
++"""
++API v2 WebSockets Package
++
++This package contains WebSocket handling for real-time communication:
++- Connection manager
++- Event handlers
++- Broadcasting utilities
++"""
+diff --git a/modules/api/v2/config.py b/modules/api/v2/config.py
+new file mode 100644
+index 0000000..d76e44d
+--- /dev/null
++++ b/modules/api/v2/config.py
+@@ -0,0 +1,69 @@
++"""
++Configuration management for API v2
++
++This module handles v2-specific configuration settings,
++separate from the main SDNext configuration.
++"""
++
++from typing import Optional, Dict, Any
++from pydantic import BaseSettings, Field
++from pathlib import Path
++
++
++class ApiV2Config(BaseSettings):
++    """
++    Configuration settings for API v2.
++    
++    These settings can be overridden via environment variables
++    with the prefix "SDNEXT_V2_".
++    """
++    
++    # API Settings
++    api_host: str = Field("0.0.0.0", env="SDNEXT_V2_API_HOST")
++    api_port: int = Field(8000, env="SDNEXT_V2_API_PORT")
++    api_workers: int = Field(1, env="SDNEXT_V2_API_WORKERS")
++    
++    # Redis Settings
++    redis_enabled: bool = Field(False, env="SDNEXT_V2_REDIS_ENABLED")
++    redis_host: str = Field("localhost", env="SDNEXT_V2_REDIS_HOST")
++    redis_port: int = Field(6379, env="SDNEXT_V2_REDIS_PORT")
++    redis_db: int = Field(0, env="SDNEXT_V2_REDIS_DB")
++    redis_password: Optional[str] = Field(None, env="SDNEXT_V2_REDIS_PASSWORD")
++    
++    # Cache Settings
++    cache_enabled: bool = Field(True, env="SDNEXT_V2_CACHE_ENABLED")
++    cache_ttl: int = Field(3600, env="SDNEXT_V2_CACHE_TTL")
++    cache_max_size: int = Field(1000, env="SDNEXT_V2_CACHE_MAX_SIZE")
++    
++    # Queue Settings
++    queue_max_size: int = Field(100, env="SDNEXT_V2_QUEUE_MAX_SIZE")
++    queue_timeout: int = Field(300, env="SDNEXT_V2_QUEUE_TIMEOUT")
++    queue_workers: int = Field(4, env="SDNEXT_V2_QUEUE_WORKERS")
++    
++    # WebSocket Settings
++    ws_heartbeat_interval: int = Field(30, env="SDNEXT_V2_WS_HEARTBEAT")
++    ws_max_connections: int = Field(1000, env="SDNEXT_V2_WS_MAX_CONNECTIONS")
++    
++    # Storage Settings
++    storage_hot_path: Path = Field(Path("outputs/v2/hot"), env="SDNEXT_V2_STORAGE_HOT")
++    storage_warm_path: Path = Field(Path("outputs/v2/warm"), env="SDNEXT_V2_STORAGE_WARM")
++    storage_cold_path: Path = Field(Path("outputs/v2/cold"), env="SDNEXT_V2_STORAGE_COLD")
++    
++    # Security Settings
++    jwt_secret: Optional[str] = Field(None, env="SDNEXT_V2_JWT_SECRET")
++    jwt_algorithm: str = Field("HS256", env="SDNEXT_V2_JWT_ALGORITHM")
++    jwt_expiry: int = Field(86400, env="SDNEXT_V2_JWT_EXPIRY")
++    
++    # Rate Limiting
++    rate_limit_enabled: bool = Field(True, env="SDNEXT_V2_RATE_LIMIT_ENABLED")
++    rate_limit_requests: int = Field(100, env="SDNEXT_V2_RATE_LIMIT_REQUESTS")
++    rate_limit_period: int = Field(60, env="SDNEXT_V2_RATE_LIMIT_PERIOD")
++    
++    class Config:
++        env_prefix = "SDNEXT_V2_"
++        env_file = ".env.v2"
++        case_sensitive = False
++
++
++# Global configuration instance
++config = ApiV2Config()
+diff --git a/modules/api/v2/dependencies.py b/modules/api/v2/dependencies.py
+new file mode 100644
+index 0000000..aaef3e8
+--- /dev/null
++++ b/modules/api/v2/dependencies.py
+@@ -0,0 +1,46 @@
++"""
++Dependency injection for API v2
++
++This module provides FastAPI dependencies for common resources
++like database connections, cache clients, and services.
++"""
++
++from typing import Optional, AsyncGenerator
++from fastapi import Depends, HTTPException, status
++import asyncio
++
++from .config import config
++
++# Placeholder imports - to be implemented
++# from .services.cache_service import CacheService
++# from .services.queue_service import QueueService
++# from .services.storage_service import StorageService
++
++
++# Global resources
++_redis_client: Optional[Any] = None
++_queue_lock: Optional[asyncio.Lock] = None
++
++
++async def get_queue_lock() -> asyncio.Lock:
++    """
++    Get the global queue lock for synchronizing queue operations.
++    """
++    global _queue_lock
++    if _queue_lock is None:
++        _queue_lock = asyncio.Lock()
++    return _queue_lock
++
++
++async def get_redis_client():
++    """
++    Get Redis client instance.
++    
++    Returns None if Redis is not enabled.
++    """
++    if not config.redis_enabled:
++        return None
++    
++    global _redis_client
++    if _redis_client is None:
++        # TODO: Initialize Redis client
++        pass
++    return _redis_client
+diff --git a/modules/api/v2/README.md b/modules/api/v2/README.md
+new file mode 100644
+index 0000000..3cc4f7d
+--- /dev/null
++++ b/modules/api/v2/README.md
+@@ -0,0 +1,89 @@
++# SDNext v2 API
++
++A modern, async-first API implementation for SDNext that provides enhanced performance, real-time updates, and improved scalability.
++
++## Features
++
++- **Async-First Design**: Built with FastAPI and async/await throughout
++- **Real-time Updates**: WebSocket and Server-Sent Events support
++- **Enhanced Queue Management**: Redis-backed distributed queue with priority support
++- **Multi-tier Caching**: In-memory, Redis, and semantic similarity caching
++- **UI Agnostic**: No Gradio dependencies, works with any frontend
++- **Backward Compatible**: Runs alongside v1 API with adapter support
++
++## Architecture
++
++```
++modules/api/v2/
++├── api.py           # Main ApiV2 class
++├── config.py        # Configuration management
++├── dependencies.py  # Dependency injection
++├── routers/         # Domain-specific routers
++│   ├── system.py    # System information endpoints
++│   ├── generation.py # Image generation endpoints
++│   ├── canvas.py    # Canvas operations
++│   ├── models.py    # Model management
++│   └── queue.py     # Queue management
++├── models/          # Pydantic data models
++│   ├── generation.py # Generation request/response models
++│   ├── system.py    # System info models
++│   └── common.py    # Shared models
++├── middleware/      # Custom middleware
++│   ├── auth.py      # Authentication
++│   └── rate_limit.py # Rate limiting
++├── services/        # Business logic services
++│   ├── queue_service.py    # Queue management
++│   ├── cache_service.py    # Caching logic
++│   └── storage_service.py  # Asset storage
++├── utils/           # Utility functions
++│   └── file_utils.py # File operations
++└── websockets/      # WebSocket handlers
++    └── manager.py   # Connection management
++```
++
++## Installation
++
++The v2 API is included with SDNext and requires no additional installation.
++Required dependencies will be installed automatically.
++
++## Configuration
++
++Configuration can be set via environment variables or the `.env.v2` file:
++
++```bash
++# API Settings
++SDNEXT_V2_API_HOST=0.0.0.0
++SDNEXT_V2_API_PORT=8000
++
++# Redis Settings (optional)
++SDNEXT_V2_REDIS_ENABLED=true
++SDNEXT_V2_REDIS_HOST=localhost
++SDNEXT_V2_REDIS_PORT=6379
++
++# Cache Settings
++SDNEXT_V2_CACHE_ENABLED=true
++SDNEXT_V2_CACHE_TTL=3600
++```
++
++## Usage
++
++The v2 API will be available at `/sdapi/v2/` endpoints once enabled.
++
++### Example Requests
++
++```python
++# Text to Image Generation
++response = requests.post(
++    "http://localhost:7860/sdapi/v2/generation/txt2img",
++    json={
++        "prompt": "a beautiful landscape",
++        "width": 512,
++        "height": 512,
++        "steps": 20
++    }
++)
++
++# WebSocket connection for real-time updates
++ws = websocket.WebSocket()
++ws.connect("ws://localhost:7860/sdapi/v2/ws")
++```
++
++## Development Status
++
++The v2 API is currently under active development. See the task list in `sdnext-v2-api-tasks.md` for implementation progress.
+EOF
