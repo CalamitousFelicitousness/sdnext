@@ -9,7 +9,7 @@ import torch
 import transformers
 import gradio as gr
 from PIL import Image
-from modules import scripts_manager, shared, devices, errors, processing, sd_models, sd_modules, timer
+from modules import scripts_manager, shared, devices, errors, processing, sd_models, sd_modules, timer, ui_symbols
 
 
 debug_enabled = os.environ.get('SD_LLM_DEBUG', None) is not None
@@ -28,6 +28,25 @@ def b64(image):
         return encoded
 
 
+def get_model_display_name(model_id, img2img_models):
+    """Add capability symbols to model display names"""
+    name = model_id
+    symbols = []
+
+    # Check if model has vision capability
+    if model_id in img2img_models or '-VL-' in model_id or '-VL2-' in model_id or 'VL' in model_id.split('/')[-1]:
+        symbols.append(ui_symbols.vision)
+
+    # Check if model has reasoning capability
+    if 'Thinking' in model_id or 'thinking' in model_id:
+        symbols.append(ui_symbols.reasoning)
+
+    if symbols:
+        name = f"{model_id} {' '.join(symbols)}"
+
+    return name
+
+
 @dataclass
 class Options:
     img2img = [
@@ -40,6 +59,8 @@ class Options:
         'Qwen/Qwen3-VL-4B-Thinking',
         'Qwen/Qwen3-VL-8B-Instruct',
         'Qwen/Qwen3-VL-8B-Thinking',
+        'XiaomiMiMo/MiMo-VL-7B-RL-2508',
+        'moondream/moondream3-preview'
     ]
     models = {
         'google/gemma-3-1b-it': {},
@@ -113,12 +134,34 @@ class Script(scripts_manager.Script):
     tokenizer: transformers.AutoProcessor = None
     busy: bool = False
     options = Options()
+    model_display_names = {}  # Maps display names to model IDs
+    model_display_list = []  # List of display names for dropdown
 
     def title(self):
         return 'Prompt enhance'
 
     def show(self, _is_img2img):
         return scripts_manager.AlwaysVisible
+
+    def init_model_display_names(self):
+        """Initialize model display names with capability symbols"""
+        if not self.model_display_list:  # Only initialize once
+            self.model_display_names = {}
+            self.model_display_list = []
+            for model_id in self.options.models:
+                display_name = get_model_display_name(model_id, self.options.img2img)
+                self.model_display_names[display_name] = model_id
+                self.model_display_list.append(display_name)
+            # Update default to use display name
+            self.options.default_display = get_model_display_name(self.options.default, self.options.img2img)
+
+    def get_model_id(self, display_name):
+        """Get actual model ID from display name"""
+        # If it's already a model ID (for backwards compatibility), return as-is
+        if display_name in self.options.models:
+            return display_name
+        # Otherwise look up in the mapping
+        return self.model_display_names.get(display_name, display_name)
 
     def compile(self):
         if self.llm is None or 'LLM' not in shared.opts.cuda_compile:
@@ -127,7 +170,9 @@ class Script(scripts_manager.Script):
         self.llm = compile_torch(self.llm)
 
     def load(self, name:str=None, model_repo:str=None, model_gguf:str=None, model_type:str=None, model_file:str=None):
-        name = name or self.options.default
+        name = name or getattr(self.options, 'default_display', self.options.default)
+        # Convert display name to model ID
+        model_id = self.get_model_id(name)
         if self.busy:
             shared.log.debug('Prompt enhance: busy')
             return
@@ -138,12 +183,12 @@ class Script(scripts_manager.Script):
 
         from modules import modelloader, model_quant, ggml
         modelloader.hf_login()
-        model_repo = model_repo or self.options.models.get(name, {}).get('repo', None) or name
-        model_gguf = model_gguf or self.options.models.get(name, {}).get('gguf', None) or model_repo
-        model_type = model_type or self.options.models.get(name, {}).get('type', None)
-        model_file = model_file or self.options.models.get(name, {}).get('file', None)
-        model_subfolder = self.options.models.get(name, {}).get('subfolder', None)
-        model_tokenizer = self.options.models.get(name, {}).get('tokenizer', None)
+        model_repo = model_repo or self.options.models.get(model_id, {}).get('repo', None) or model_id
+        model_gguf = model_gguf or self.options.models.get(model_id, {}).get('gguf', None) or model_repo
+        model_type = model_type or self.options.models.get(model_id, {}).get('type', None)
+        model_file = model_file or self.options.models.get(model_id, {}).get('file', None)
+        model_subfolder = self.options.models.get(model_id, {}).get('subfolder', None)
+        model_tokenizer = self.options.models.get(model_id, {}).get('tokenizer', None)
 
         gguf_args = {}
         if model_type is not None and model_file is not None and len(model_type) > 2 and len(model_file) > 2:
@@ -472,13 +517,17 @@ class Script(scripts_manager.Script):
         return [response, gr.update()]
 
     def get_custom(self, name):
-        model_repo = self.options.models.get(name, {}).get('repo', None) or name
-        model_gguf = self.options.models.get(name, {}).get('gguf', None)
-        model_type = self.options.models.get(name, {}).get('type', None)
-        model_file = self.options.models.get(name, {}).get('file', None)
+        model_id = self.get_model_id(name)
+        model_repo = self.options.models.get(model_id, {}).get('repo', None) or model_id
+        model_gguf = self.options.models.get(model_id, {}).get('gguf', None)
+        model_type = self.options.models.get(model_id, {}).get('type', None)
+        model_file = self.options.models.get(model_id, {}).get('file', None)
         return [model_repo, model_gguf, model_type, model_file]
 
     def ui(self, _is_img2img):
+        # Initialize model display names with symbols
+        self.init_model_display_names()
+
         with gr.Accordion('Prompt enhance', open=False, elem_id='prompt_enhance'):
             with gr.Row():
                 apply_btn = gr.Button(value='Enhance now', elem_id='prompt_enhance_apply', variant='primary')
@@ -488,7 +537,7 @@ class Script(scripts_manager.Script):
             gr.HTML('<br>')
             with gr.Group():
                 with gr.Row():
-                    llm_model = gr.Dropdown(label='LLM model', choices=list(self.options.models), value=self.options.default, interactive=True, allow_custom_value=True, elem_id='prompt_enhance_model')
+                    llm_model = gr.Dropdown(label='LLM model', choices=self.model_display_list, value=self.options.default_display, interactive=True, allow_custom_value=True, elem_id='prompt_enhance_model')
                 with gr.Row():
                     load_btn = gr.Button(value='Load model', elem_id='prompt_enhance_load', variant='secondary')
                     load_btn.click(fn=self.load, inputs=[llm_model], outputs=[])

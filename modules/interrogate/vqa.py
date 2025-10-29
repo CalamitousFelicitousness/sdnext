@@ -8,7 +8,7 @@ import torch
 import transformers
 import transformers.dynamic_module_utils
 from PIL import Image, ImageDraw, ImageFont
-from modules import shared, devices, errors, model_quant, sd_models, sd_models_compile
+from modules import shared, devices, errors, model_quant, sd_models, sd_models_compile, ui_symbols
 
 
 # Debug logging - function-based to avoid circular import
@@ -33,11 +33,11 @@ vlm_models = {
     "Alibaba Qwen 2.5 Omni 3B": "Qwen/Qwen2.5-Omni-3B",
     "Alibaba Qwen 2.5 VL 3B": "Qwen/Qwen2.5-VL-3B-Instruct",
     "Alibaba Qwen 3 VL 2B": "Qwen/Qwen3-VL-2B-Instruct",
-    "Alibaba Qwen 3 VL 2B Thinking": "Qwen/Qwen3-VL-2B-Thinking",
+    f"Alibaba Qwen 3 VL 2B Thinking {ui_symbols.reasoning}": "Qwen/Qwen3-VL-2B-Thinking",
     "Alibaba Qwen 3 VL 4B": "Qwen/Qwen3-VL-4B-Instruct",
-    "Alibaba Qwen 3 VL 4B Thinking": "Qwen/Qwen3-VL-4B-Thinking",
+    f"Alibaba Qwen 3 VL 4B Thinking {ui_symbols.reasoning}": "Qwen/Qwen3-VL-4B-Thinking",
     "Alibaba Qwen 3 VL 8B": "Qwen/Qwen3-VL-8B-Instruct",
-    "Alibaba Qwen 3 VL 8B Thinking": "Qwen/Qwen3-VL-8B-Thinking",
+    f"Alibaba Qwen 3 VL 8B Thinking {ui_symbols.reasoning}": "Qwen/Qwen3-VL-8B-Thinking",
     "XiaomiMiMo MiMo VL 7B RL": "XiaomiMiMo/MiMo-VL-7B-RL-2508", # 8.3GB
     "Huggingface Smol VL2 0.5B": "HuggingFaceTB/SmolVLM-500M-Instruct",
     "Huggingface Smol VL2 2B": "HuggingFaceTB/SmolVLM-Instruct",
