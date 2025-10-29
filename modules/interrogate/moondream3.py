@@ -337,7 +337,8 @@ def predict(question: str, image: Image.Image, repo: str, model_name: str = None
         **kwargs: Additional parameters (max_objects for detect, etc.)
 
     Returns:
-        Response string or structured data (or generator if stream=True)
+        Response string or tuple (text, annotated_image) for detect/point modes
+        (or generator if stream=True for query/caption modes)
     """
     debug(f'VQA interrogate: handler=moondream3 model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None} mode={mode} stream={stream}')
 
@@ -402,16 +403,17 @@ def predict(question: str, image: Image.Image, repo: str, model_name: str = None
             debug(f'VQA interrogate: handler=moondream3 point_extracted_object="{object_name}"')
             result = point(image, object_name, repo)
             if result:
-                # Handle multiple instances
+                # Handle multiple instances - return text and points for drawing
                 if len(result) == 1:
-                    return f"Found at coordinates: ({result[0][0]:.3f}, {result[0][1]:.3f})"
+                    text = f"Found at coordinates: ({result[0][0]:.3f}, {result[0][1]:.3f})"
                 else:
                     # Multiple instances found - format with count
                     lines = [f"Found {len(result)} instances:"]
                     for i, (x, y) in enumerate(result, 1):
                         lines.append(f"  {i}. ({x:.3f}, {y:.3f})")
-                    return '\n'.join(lines)
-            return "Object not found"
+                    text = '\n'.join(lines)
+                return (text, {'points': result})  # Return text and points data
+            return ("Object not found", None)
         elif mode == 'detect':
             # Extract object name from question - case insensitive
             object_name = question
@@ -428,12 +430,13 @@ def predict(question: str, image: Image.Image, repo: str, model_name: str = None
             debug(f'VQA interrogate: handler=moondream3 detect_extracted_object="{object_name}"')
 
             results = detect(image, object_name, repo, max_objects=kwargs.get('max_objects', 10))
-            # Format as string for display
+            # Format as string for display and return detections for drawing
             if results:
                 lines = [f"{det['label']}: [{det['bbox'][0]:.3f}, {det['bbox'][1]:.3f}, {det['bbox'][2]:.3f}, {det['bbox'][3]:.3f}] (confidence: {det['confidence']:.2f})"
                         for det in results]
-                return '\n'.join(lines)
-            return "No objects detected"
+                text = '\n'.join(lines)
+                return (text, {'detections': results})  # Return text and detection data
+            return ("No objects detected", None)
         else:  # mode == 'query'
             if len(question) < 2:
                 question = "Describe this image."

@@ -7,7 +7,7 @@ import copy
 import torch
 import transformers
 import transformers.dynamic_module_utils
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from modules import shared, devices, errors, model_quant, sd_models, sd_models_compile
 
 
@@ -197,6 +197,75 @@ def get_kwargs():
     if shared.opts.interrogate_vlm_top_p > 0:
         kwargs['top_p'] = shared.opts.interrogate_vlm_top_p
     return kwargs
+
+
+def draw_bounding_boxes(image: Image.Image, detections: list, points: list = None) -> Image.Image:
+    """
+    Draw bounding boxes and/or points on an image.
+
+    Args:
+        image: PIL Image to annotate
+        detections: List of detection dicts with format:
+            [{'label': str, 'bbox': [x1, y1, x2, y2], 'confidence': float}, ...]
+            where coordinates are normalized 0-1
+        points: Optional list of (x, y) tuples with normalized 0-1 coordinates
+
+    Returns:
+        Annotated PIL Image with boxes and labels drawn
+    """
+    if not detections and not points:
+        return None
+
+    # Create a copy to avoid modifying original
+    annotated = image.copy()
+    draw = ImageDraw.Draw(annotated)
+    width, height = image.size
+
+    # Try to load a font, fall back to default if unavailable
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=max(12, int(min(width, height) * 0.02)))
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Draw bounding boxes
+    if detections:
+        colors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', '#FFA500', '#800080']
+        for idx, det in enumerate(detections):
+            bbox = det['bbox']
+            label = det.get('label', 'object')
+            confidence = det.get('confidence', 1.0)
+
+            # Convert normalized coordinates to pixel coordinates
+            x1 = int(bbox[0] * width)
+            y1 = int(bbox[1] * height)
+            x2 = int(bbox[2] * width)
+            y2 = int(bbox[3] * height)
+
+            # Choose color
+            color = colors[idx % len(colors)]
+
+            # Draw box
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=max(2, int(min(width, height) * 0.003)))
+
+            # Draw label with background
+            label_text = f"{label} {confidence:.2f}" if confidence < 1.0 else label
+            bbox_font = draw.textbbox((x1, y1), label_text, font=font)
+            text_width = bbox_font[2] - bbox_font[0]
+            text_height = bbox_font[3] - bbox_font[1]
+            draw.rectangle([x1, y1 - text_height - 4, x1 + text_width + 4, y1], fill=color)
+            draw.text((x1 + 2, y1 - text_height - 2), label_text, fill='white', font=font)
+
+    # Draw points
+    if points:
+        point_radius = max(3, int(min(width, height) * 0.01))
+        for px, py in points:
+            x = int(px * width)
+            y = int(py * height)
+            # Draw point as a circle
+            draw.ellipse([x - point_radius, y - point_radius, x + point_radius, y + point_radius],
+                        fill='#FF0000', outline='#FFFFFF', width=2)
+
+    return annotated
 
 
 def fastvlm(question: str, image: Image.Image, repo: str = None, model_name: str = None):
@@ -990,13 +1059,29 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
     if shared.opts.interrogate_offload and model is not None:
         sd_models.move_model(model, devices.cpu, force=True)
     devices.torch_gc(force=True, reason='vqa')
-    answer = clean(answer, question, prefill)
-    debug(f'VQA interrogate: handler={handler} response_after_clean="{answer}"')
+
+    # Handle tuple returns with detection data
+    annotated_image = None
+    if isinstance(answer, tuple) and len(answer) == 2:
+        text, data_dict = answer
+        text = clean(text, question, prefill)
+        # Draw bounding boxes or points if available
+        if data_dict and isinstance(data_dict, dict) and image:
+            detections = data_dict.get('detections', None)
+            points = data_dict.get('points', None)
+            if detections or points:
+                annotated_image = draw_bounding_boxes(image, detections or [], points)
+                debug(f'VQA interrogate: handler={handler} created annotated image detections={len(detections) if detections else 0} points={len(points) if points else 0}')
+        answer = text
+    else:
+        answer = clean(answer, question, prefill)
+
+    debug(f'VQA interrogate: handler={handler} response_after_clean="{answer}" has_annotation={annotated_image is not None}')
     t1 = time.time()
     if not quiet:
         shared.log.debug(f'Interrogate: type=vlm model="{model_name}" repo="{vqa_model}" args={get_kwargs()} time={t1-t0:.2f}')
     shared.state.end(jobid)
-    return answer
+    return (answer, annotated_image)
 
 
 def batch(model_name, system_prompt, batch_files, batch_folder, batch_str, question, prompt, write, append, recursive, prefill=None, thinking_mode=False):
@@ -1046,7 +1131,16 @@ def batch(model_name, system_prompt, batch_files, batch_folder, batch_str, quest
                 if shared.state.interrupted:
                     break
                 image = Image.open(file)
-                prompt = interrogate(question, system_prompt, prompt, image, model_name, prefill, thinking_mode, quiet=True)
+                result = interrogate(question, system_prompt, prompt, image, model_name, prefill, thinking_mode, quiet=True)
+                # Handle tuple return (text, annotated_image)
+                if isinstance(result, tuple):
+                    prompt, annotated_img = result
+                    # Optionally save annotated image
+                    if annotated_img and write:
+                        annotated_path = os.path.splitext(file)[0] + "_annotated.png"
+                        annotated_img.save(annotated_path)
+                else:
+                    prompt = result
                 prompts.append(prompt)
                 if write:
                     writer.add(file, prompt)
