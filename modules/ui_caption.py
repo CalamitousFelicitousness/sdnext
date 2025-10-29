@@ -121,6 +121,8 @@ def create_ui():
         with gr.Column(variant='compact', elem_id='interrogate_output'):
             with gr.Row(elem_id='interrogate_output_prompt'):
                 prompt = gr.Textbox(label="Answer", lines=12, placeholder="ai generated image description")
+            with gr.Row(elem_id='interrogate_output_image'):
+                output_image = gr.Image(type='pil', label="Annotated Image", interactive=False, visible=False, elem_id='interrogate_output_image_display')
             with gr.Row(elem_id='interrogate_output_classes'):
                 medium = gr.Label(elem_id="interrogate_label_medium", label="Medium", num_top_classes=5, visible=False)
                 artist = gr.Label(elem_id="interrogate_label_artist", label="Artist", num_top_classes=5, visible=False)
