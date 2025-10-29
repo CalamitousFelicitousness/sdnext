@@ -3,12 +3,20 @@ import os
 import time
 import json
 import base64
+import copy
 import torch
 import transformers
 import transformers.dynamic_module_utils
 from PIL import Image
 from modules import shared, devices, errors, model_quant, sd_models, sd_models_compile
 
+
+# Debug logging - function-based to avoid circular import
+debug_enabled = os.environ.get('SD_VQA_DEBUG', None) is not None
+
+def debug(*args, **kwargs):
+    if debug_enabled:
+        shared.log.trace(*args, **kwargs)
 
 processor = None
 model = None
@@ -19,6 +27,8 @@ vlm_models = {
     "Google Gemma 3 4B": "google/gemma-3-4b-it",
     "Google Gemma 3n E2B": "google/gemma-3n-E2B-it", # 1.5GB
     "Google Gemma 3n E4B": "google/gemma-3n-E4B-it", # 1.5GB
+    "Nidum Gemma 3 4B Uncensored": "nidum/Nidum-Gemma-3-4B-it-Uncensored",
+    "Allura Gemma 3 Glitter 4B": "allura-org/Gemma-3-Glitter-4B",
     "Alibaba Qwen 2.0 VL 2B": "Qwen/Qwen2-VL-2B-Instruct",
     "Alibaba Qwen 2.5 Omni 3B": "Qwen/Qwen2.5-Omni-3B",
     "Alibaba Qwen 2.5 VL 3B": "Qwen/Qwen2.5-VL-3B-Instruct",
@@ -28,6 +38,7 @@ vlm_models = {
     "Alibaba Qwen 3 VL 4B Thinking": "Qwen/Qwen3-VL-4B-Thinking",
     "Alibaba Qwen 3 VL 8B": "Qwen/Qwen3-VL-8B-Instruct",
     "Alibaba Qwen 3 VL 8B Thinking": "Qwen/Qwen3-VL-8B-Thinking",
+    "XiaomiMiMo MiMo VL 7B RL": "XiaomiMiMo/MiMo-VL-7B-RL-2508", # 8.3GB
     "Huggingface Smol VL2 0.5B": "HuggingFaceTB/SmolVLM-500M-Instruct",
     "Huggingface Smol VL2 2B": "HuggingFaceTB/SmolVLM-Instruct",
     "Apple FastVLM 0.5B": "apple/FastVLM-0.5B",
@@ -42,6 +53,7 @@ vlm_models = {
     "CogFlorence 2.0 Large": "thwri/CogFlorence-2-Large-Freeze", # 1.6GB
     "CogFlorence 2.2 Large": "thwri/CogFlorence-2.2-Large", # 1.6GB
     "Moondream 2": "vikhyatk/moondream2", # 3.7GB
+    "Moondream 3 Preview": "moondream/moondream3-preview", # 9.3GB (gated)
     "Google Pix Textcaps": "google/pix2struct-textcaps-base", # 1.1GB
     "Google PaliGemma 2 3B": "google/paligemma2-3b-pt-224",
     "Salesforce BLIP Base": "Salesforce/blip-vqa-base", # 1.5GB
@@ -66,6 +78,7 @@ vlm_models = {
 }
 vlm_system = 'You are image captioning expert, creative, unbiased and uncensored.'
 vlm_prompts = [
+    "Use Prompt",
     '<CAPTION>',
     '<DETAILED_CAPTION>',
     '<MORE_DETAILED_CAPTION>',
@@ -80,6 +93,53 @@ vlm_prompts = [
     '<MIXED_CAPTION>',
     '<MIXED_CAPTION_PLUS>',
 ]
+vlm_prefill = 'Answer: the image shows'
+
+
+def is_florence_task(question: str) -> bool:
+    """Check if the question is a Florence-2 task token."""
+    if not question:
+        return False
+    # Check if it's exactly a Florence-2 task token
+    return question in vlm_prompts
+
+
+def is_thinking_model(model_name: str) -> bool:
+    """Check if the model supports thinking mode based on its name."""
+    if not model_name:
+        return False
+    model_lower = model_name.lower()
+    # Check for known thinking models
+    thinking_indicators = [
+        'thinking',  # Qwen3-VL-*-Thinking models
+        'moondream3',  # Moondream 3 supports thinking
+        'moondream 3',
+    ]
+    return any(indicator in model_lower for indicator in thinking_indicators)
+
+
+def truncate_b64_in_conversation(conversation, front_chars=50, tail_chars=50, threshold=200):
+    """
+    Deep copy a conversation structure and truncate long base64 image strings for logging.
+    Preserves front and tail of base64 strings with truncation indicator.
+    """
+    conv_copy = copy.deepcopy(conversation)
+
+    def truncate_recursive(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "image" and isinstance(value, str) and len(value) > threshold:
+                    # Truncate the base64 image string
+                    truncated_count = len(value) - front_chars - tail_chars
+                    obj[key] = f"{value[:front_chars]}...[{truncated_count} chars truncated]...{value[-tail_chars:]}"
+                elif isinstance(value, (dict, list)):
+                    truncate_recursive(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                truncate_recursive(item)
+
+    truncate_recursive(conv_copy)
+    return conv_copy
 
 
 def b64(image):
@@ -92,13 +152,15 @@ def b64(image):
         return encoded
 
 
-def clean(response, question):
-    strip = ['---', '\r', '\t', '**', '"', '“', '”', 'Assistant:', 'Caption:', '<|im_end|>', '<pad>']
+def clean(response, question, prefill=None):
+    strip = ['---', '\r', '\t', '**', '"', '"', '"', 'Assistant:', 'Caption:', '<|im_end|>', '<pad>']
     if isinstance(response, str):
         response = response.strip()
     elif isinstance(response, dict):
         if 'answer' in response:
             response = response['answer']
+        elif 'caption' in response:
+            response = response['caption']
         elif 'task' in response:
             response = response['task']
         else:
@@ -107,6 +169,10 @@ def clean(response, question):
         response = response[0]
     else:
         response = str(response)
+    # Remove prefill text
+    prefill = prefill or vlm_prefill  # Use provided prefill or default
+    if response.startswith(prefill):
+        response = response[len(prefill):].strip()
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     if question in response:
         response = response.split(question, 1)[1]
@@ -133,10 +199,11 @@ def get_kwargs():
     return kwargs
 
 
-def fastvlm(question: str, image: Image.Image, repo: str = None):
+def fastvlm(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=fastvlm model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
-        shared.log.debug(f'Interrogate load: vlm="{repo}"')
+        shared.log.debug(f'VQA Interrogate load: vlm="{repo}"')
         model = None
         processor = transformers.AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
         model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -156,6 +223,7 @@ def fastvlm(question: str, image: Image.Image, repo: str = None):
     IMAGE_TOKEN_INDEX = -200  # what the model code looks for
     messages = [{"role": "user", "content": f"<image>\n{question}"}]
     rendered = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    debug(f'VQA interrogate: handler=fastvlm rendered_template="{rendered}"')
     pre, post = rendered.split("<image>", 1)
     pre_ids = processor(pre,  return_tensors="pt", add_special_tokens=False).input_ids
     post_ids = processor(post, return_tensors="pt", add_special_tokens=False).input_ids
@@ -163,6 +231,7 @@ def fastvlm(question: str, image: Image.Image, repo: str = None):
     input_ids = torch.cat([pre_ids, img_tok, post_ids], dim=1)
     input_ids = input_ids.to(devices.device)
     attention_mask = torch.ones_like(input_ids, device=devices.device)
+    debug(f'VQA interrogate: handler=fastvlm input_ids_shape={input_ids.shape}')
     px = model.get_vision_tower().image_processor(images=image, return_tensors="pt")
     px = px["pixel_values"].to(model.device, dtype=model.dtype)
     with devices.inference_context():
@@ -172,18 +241,20 @@ def fastvlm(question: str, image: Image.Image, repo: str = None):
             images=px,
             max_new_tokens=128,
         )
+    debug(f'VQA interrogate: handler=fastvlm output_shape={outputs.shape}')
     answer = processor.decode(outputs[0], skip_special_tokens=True)
+    debug(f'VQA interrogate: handler=fastvlm response_before_clean="{answer}"')
     return answer
 
 
-def qwen(question: str, image: Image.Image, repo: str = None, system_prompt: str = None):
+def qwen(question: str, image: Image.Image, repo: str = None, system_prompt: str = None, model_name: str = None, prefill: str = None, thinking_mode: bool = False):
     global processor, model, loaded # pylint: disable=global-statement
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
         if 'Qwen3-VL' in repo or 'Qwen3VL' in repo:
             cls_name = transformers.Qwen3VLForConditionalGeneration
-        elif 'Qwen2.5-VL' in repo or 'Qwen2_5_VL' in repo:
+        elif 'Qwen2.5-VL' in repo or 'Qwen2_5_VL' in repo or 'MiMo-VL' in repo:
             cls_name = transformers.Qwen2_5_VLForConditionalGeneration
         elif 'Qwen2-VL' in repo or 'Qwen2VL' in repo:
             cls_name = transformers.Qwen2VLForConditionalGeneration
@@ -201,6 +272,14 @@ def qwen(question: str, image: Image.Image, repo: str = None, system_prompt: str
         loaded = repo
         devices.torch_gc()
     sd_models.move_model(model, devices.device)
+
+    # Get model class name for logging
+    cls_name = model.__class__.__name__
+    debug(f'VQA interrogate: handler=qwen model_name="{model_name}" model_class="{cls_name}" repo="{repo}" question="{question}" system_prompt="{system_prompt}" image_size={image.size if image else None}')
+
+    # Warn if using Florence-2 task tokens with non-Florence-2 models
+    if is_florence_task(question):
+        shared.log.warning(f'Interrogate: Florence-2 task token "{question}" is designed for Florence-2 models. Using it anyway, but results may vary.')
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     system_prompt = system_prompt or shared.opts.interrogate_vlm_system
     conversation = [
@@ -216,22 +295,53 @@ def qwen(question: str, image: Image.Image, repo: str = None, system_prompt: str
             ],
         }
     ]
-    text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    # Add prefill for all models
+    prefill = prefill or vlm_prefill  # Use provided prefill or default
+    # For thinking models, wrap prefill inside <think> tag without closing it
+    # Use manual toggle OR auto-detection based on model name
+    use_thinking = thinking_mode or is_thinking_model(model_name)
+    if use_thinking and prefill:
+        prefill_text = f'<think>{prefill}'
+        debug(f'VQA interrogate: handler=qwen thinking_mode={thinking_mode} auto_detected={is_thinking_model(model_name)} wrapped_prefill="{prefill_text}"')
+    else:
+        prefill_text = prefill
+    conversation.append({
+        "role": "assistant",
+        "content": [{"type": "text", "text": prefill_text}],
+    })
+    debug(f'VQA interrogate: handler=qwen prefill="{prefill_text}"')
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=qwen conversation_roles={[msg["role"] for msg in conversation]}')
+        debug(f'VQA interrogate: handler=qwen full_conversation={truncate_b64_in_conversation(conversation)}')
+        debug('VQA interrogate: handler=qwen add_generation_prompt=False continue_final_message=True')
+    try:
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=False, continue_final_message=True)
+    except (TypeError, ValueError) as e:
+        # Fallback for models that don't support continue_final_message
+        debug(f'VQA interrogate: handler=qwen continue_final_message not supported, using add_generation_prompt=True instead: {e}')
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=qwen text_prompt="{text_prompt}"')
     inputs = processor(text=[text_prompt], images=[image], padding=True, return_tensors="pt")
     inputs = inputs.to(devices.device, devices.dtype)
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=qwen generation_kwargs={gen_kwargs} input_ids_shape={inputs.input_ids.shape}')
     output_ids = model.generate(
         **inputs,
-        **get_kwargs(),
+        **gen_kwargs,
     )
+    debug(f'VQA interrogate: handler=qwen output_ids_shape={output_ids.shape}')
     generated_ids = [
         output_ids[len(input_ids) :]
         for input_ids, output_ids in zip(inputs.input_ids, output_ids)
     ]
     response = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=qwen response_before_clean="{response}"')
     return response
 
 
-def gemma(question: str, image: Image.Image, repo: str = None, system_prompt: str = None):
+def gemma(question: str, image: Image.Image, repo: str = None, system_prompt: str = None, model_name: str = None, prefill: str = None, thinking_mode: bool = False):
     global processor, model, loaded # pylint: disable=global-statement
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
@@ -252,6 +362,14 @@ def gemma(question: str, image: Image.Image, repo: str = None, system_prompt: st
         loaded = repo
         devices.torch_gc()
     sd_models.move_model(model, devices.device)
+
+    # Get model class name for logging
+    cls_name = model.__class__.__name__
+    debug(f'VQA interrogate: handler=gemma model_name="{model_name}" model_class="{cls_name}" repo="{repo}" question="{question}" system_prompt="{system_prompt}" image_size={image.size if image else None}')
+
+    # Warn if using Florence-2 task tokens with non-Florence-2 models
+    if is_florence_task(question):
+        shared.log.warning(f'Interrogate: Florence-2 task token "{question}" is designed for Florence-2 models. Using it anyway, but results may vary.')
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     system_prompt = system_prompt or shared.opts.interrogate_vlm_system
 
@@ -268,26 +386,78 @@ def gemma(question: str, image: Image.Image, repo: str = None, system_prompt: st
         { "role": "system", "content": system_content},
         { "role": "user", "content": user_content },
     ]
-    inputs = processor.apply_chat_template(
-        conversation,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(device=devices.device, dtype=devices.dtype)
+    # Add prefill for all models
+    prefill = prefill or vlm_prefill  # Use provided prefill or default
+    # For thinking models, wrap prefill inside <think> tag without closing it
+    # Use manual toggle OR auto-detection based on model name
+    use_thinking = thinking_mode or is_thinking_model(model_name)
+    if use_thinking and prefill:
+        prefill_text = f'<think>{prefill}'
+        debug(f'VQA interrogate: handler=gemma thinking_mode={thinking_mode} auto_detected={is_thinking_model(model_name)} wrapped_prefill="{prefill_text}"')
+    else:
+        prefill_text = prefill
+    conversation.append({
+        "role": "assistant",
+        "content": [{"type": "text", "text": prefill_text}],
+    })
+    debug(f'VQA interrogate: handler=gemma prefill="{prefill_text}"')
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=gemma conversation_roles={[msg["role"] for msg in conversation]}')
+        debug(f'VQA interrogate: handler=gemma full_conversation={truncate_b64_in_conversation(conversation)}')
+        debug('VQA interrogate: handler=gemma add_generation_prompt=False continue_final_message=True')
+    try:
+        text_prompt = processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=False,
+        )
+    except (TypeError, ValueError) as e:
+        debug(f'VQA interrogate: handler=gemma continue_final_message not supported, using add_generation_prompt=True instead: {e}')
+        text_prompt = processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=gemma text_prompt="{text_prompt}"')
+    try:
+        inputs = processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(device=devices.device, dtype=devices.dtype)
+    except (TypeError, ValueError) as e:
+        debug(f'VQA interrogate: handler=gemma continue_final_message not supported, using add_generation_prompt=True instead: {e}')
+        inputs = processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(device=devices.device, dtype=devices.dtype)
     input_len = inputs["input_ids"].shape[-1]
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=gemma generation_kwargs={gen_kwargs} input_len={input_len}')
     with devices.inference_context():
         generation = model.generate(
             **inputs,
-            **get_kwargs(),
+            **gen_kwargs,
         )
-        generation = generation[0][input_len:]
+    debug(f'VQA interrogate: handler=gemma output_ids_shape={generation.shape}')
+    generation = generation[0][input_len:]
     response = processor.decode(generation, skip_special_tokens=True)
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=gemma response_before_clean="{response}"')
     return response
 
 
-def paligemma(question: str, image: Image.Image, repo: str = None):
+def paligemma(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=paligemma model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         processor = transformers.PaliGemmaProcessor.from_pretrained(repo, cache_dir=shared.opts.hfcache_dir)
@@ -303,17 +473,22 @@ def paligemma(question: str, image: Image.Image, repo: str = None):
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     model_inputs = processor(text=question, images=image, return_tensors="pt").to(devices.device, devices.dtype)
     input_len = model_inputs["input_ids"].shape[-1]
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=paligemma generation_kwargs={gen_kwargs} input_len={input_len}')
     with devices.inference_context():
         generation = model.generate(
             **model_inputs,
-            **get_kwargs(),
+            **gen_kwargs,
         )
     generation = generation[0][input_len:]
+    debug(f'VQA interrogate: handler=paligemma generated_len={len(generation)}')
     response = processor.decode(generation, skip_special_tokens=True)
+    debug(f'VQA interrogate: handler=paligemma response_before_clean="{response}"')
     return response
 
 
-def ovis(question: str, image: Image.Image, repo: str = None):
+def ovis(question: str, image: Image.Image, repo: str = None, model_name: str = None):
+    debug(f'VQA interrogate: handler=ovis model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     try:
         import flash_attn # pylint: disable=unused-import
     except Exception:
@@ -342,9 +517,12 @@ def ovis(question: str, image: Image.Image, repo: str = None):
     attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
     input_ids = input_ids.unsqueeze(0).to(device=model.device)
     attention_mask = attention_mask.unsqueeze(0).to(device=model.device)
+    debug(f'VQA interrogate: handler=ovis input_ids_shape={input_ids.shape} max_partition={max_partition}')
     if pixel_values is not None:
         pixel_values = pixel_values.to(dtype=visual_tokenizer.dtype, device=visual_tokenizer.device)
     pixel_values = [pixel_values]
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=ovis generation_kwargs={gen_kwargs}')
     with devices.inference_context():
         output_ids = model.generate(
             input_ids,
@@ -354,13 +532,15 @@ def ovis(question: str, image: Image.Image, repo: str = None):
             eos_token_id=model.generation_config.eos_token_id,
             pad_token_id=text_tokenizer.pad_token_id,
             use_cache=True,
-            **get_kwargs())
+            **gen_kwargs)
+        debug(f'VQA interrogate: handler=ovis output_ids_shape={output_ids.shape}')
         response = text_tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        debug(f'VQA interrogate: handler=ovis response_before_clean="{response}"')
         print(f'Output:\n{response}')
     return response
 
 
-def smol(question: str, image: Image.Image, repo: str = None, system_prompt: str = None):
+def smol(question: str, image: Image.Image, repo: str = None, system_prompt: str = None, model_name: str = None, prefill: str = None, thinking_mode: bool = False):
     global processor, model, loaded # pylint: disable=global-statement
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
@@ -377,6 +557,14 @@ def smol(question: str, image: Image.Image, repo: str = None, system_prompt: str
         loaded = repo
         devices.torch_gc()
     sd_models.move_model(model, devices.device)
+
+    # Get model class name for logging
+    cls_name = model.__class__.__name__
+    debug(f'VQA interrogate: handler=smol model_name="{model_name}" model_class="{cls_name}" repo="{repo}" question="{question}" system_prompt="{system_prompt}" image_size={image.size if image else None}')
+
+    # Warn if using Florence-2 task tokens with non-Florence-2 models
+    if is_florence_task(question):
+        shared.log.warning(f'Interrogate: Florence-2 task token "{question}" is designed for Florence-2 models. Using it anyway, but results may vary.')
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     system_prompt = system_prompt or shared.opts.interrogate_vlm_system
     conversation = [
@@ -392,19 +580,51 @@ def smol(question: str, image: Image.Image, repo: str = None, system_prompt: str
             ],
         }
     ]
-    text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    # Add prefill for all models
+    prefill = prefill or vlm_prefill  # Use provided prefill or default
+    # For thinking models, wrap prefill inside <think> tag without closing it
+    # Use manual toggle OR auto-detection based on model name
+    use_thinking = thinking_mode or is_thinking_model(model_name)
+    if use_thinking and prefill:
+        prefill_text = f'<think>{prefill}'
+        debug(f'VQA interrogate: handler=smol thinking_mode={thinking_mode} auto_detected={is_thinking_model(model_name)} wrapped_prefill="{prefill_text}"')
+    else:
+        prefill_text = prefill
+    conversation.append({
+        "role": "assistant",
+        "content": [{"type": "text", "text": prefill_text}],
+    })
+    debug(f'VQA interrogate: handler=smol prefill="{prefill_text}"')
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=smol conversation_roles={[msg["role"] for msg in conversation]}')
+        debug(f'VQA interrogate: handler=smol full_conversation={truncate_b64_in_conversation(conversation)}')
+        debug('VQA interrogate: handler=smol add_generation_prompt=False continue_final_message=True')
+    try:
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=False, continue_final_message=True)
+    except (TypeError, ValueError) as e:
+        # Fallback for models that don't support continue_final_message
+        debug(f'VQA interrogate: handler=smol continue_final_message not supported, using add_generation_prompt=True instead: {e}')
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=smol text_prompt="{text_prompt}"')
     inputs = processor(text=text_prompt, images=[image], padding=True, return_tensors="pt")
     inputs = inputs.to(devices.device, devices.dtype)
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=smol generation_kwargs={gen_kwargs}')
     output_ids = model.generate(
         **inputs,
-        **get_kwargs(),
+        **gen_kwargs,
     )
+    debug(f'VQA interrogate: handler=smol output_ids_shape={output_ids.shape}')
     response = processor.batch_decode(output_ids,skip_special_tokens=True)
+    if debug_enabled:
+        debug(f'VQA interrogate: handler=smol response_before_clean="{response}"')
     return response
 
 
-def git(question: str, image: Image.Image, repo: str = None):
+def git(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=git model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
@@ -425,14 +645,18 @@ def git(question: str, image: Image.Image, repo: str = None):
         input_ids = [processor.tokenizer.cls_token_id] + input_ids
         input_ids = torch.tensor(input_ids).unsqueeze(0)
         git_dict['input_ids'] = input_ids.to(devices.device)
+    debug(f'VQA interrogate: handler=git git_dict_keys={list(git_dict.keys())}')
     with devices.inference_context():
         generated_ids = model.generate(**git_dict)
+    debug(f'VQA interrogate: handler=git generated_ids_shape={generated_ids.shape}')
     response = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    debug(f'VQA interrogate: handler=git response_before_clean="{response}"')
     return response
 
 
-def blip(question: str, image: Image.Image, repo: str = None):
+def blip(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=blip model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
@@ -447,14 +671,18 @@ def blip(question: str, image: Image.Image, repo: str = None):
     sd_models.move_model(model, devices.device)
     inputs = processor(image, question, return_tensors="pt")
     inputs = inputs.to(devices.device, devices.dtype)
+    debug(f'VQA interrogate: handler=blip input_keys={list(inputs.keys())}')
     with devices.inference_context():
         outputs = model.generate(**inputs)
+    debug(f'VQA interrogate: handler=blip outputs_shape={outputs.shape}')
     response = processor.decode(outputs[0], skip_special_tokens=True)
+    debug(f'VQA interrogate: handler=blip response_before_clean="{response}"')
     return response
 
 
-def vilt(question: str, image: Image.Image, repo: str = None):
+def vilt(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=vilt model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
@@ -469,16 +697,20 @@ def vilt(question: str, image: Image.Image, repo: str = None):
     sd_models.move_model(model, devices.device)
     inputs = processor(image, question, return_tensors="pt")
     inputs = inputs.to(devices.device)
+    debug(f'VQA interrogate: handler=vilt input_keys={list(inputs.keys())}')
     with devices.inference_context():
         outputs = model(**inputs)
     logits = outputs.logits
     idx = logits.argmax(-1).item()
+    debug(f'VQA interrogate: handler=vilt predicted_idx={idx}')
     response = model.config.id2label[idx]
+    debug(f'VQA interrogate: handler=vilt response_before_clean="{response}"')
     return response
 
 
-def pix(question: str, image: Image.Image, repo: str = None):
+def pix(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=pix model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
@@ -495,14 +727,18 @@ def pix(question: str, image: Image.Image, repo: str = None):
         inputs = processor(images=image, text=question, return_tensors="pt").to(devices.device)
     else:
         inputs = processor(images=image, return_tensors="pt").to(devices.device)
+    debug(f'VQA interrogate: handler=pix input_keys={list(inputs.keys())}')
     with devices.inference_context():
         outputs = model.generate(**inputs)
+    debug(f'VQA interrogate: handler=pix outputs_shape={outputs.shape}')
     response = processor.decode(outputs[0], skip_special_tokens=True)
+    debug(f'VQA interrogate: handler=pix response_before_clean="{response}"')
     return response
 
 
-def moondream(question: str, image: Image.Image, repo: str = None):
+def moondream(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=moondream model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         shared.log.debug(f'Interrogate load: vlm="{repo}"')
         model = None
@@ -520,6 +756,7 @@ def moondream(question: str, image: Image.Image, repo: str = None):
     sd_models.move_model(model, devices.device)
     question = question.replace('<', '').replace('>', '').replace('_', ' ')
     encoded = model.encode_image(image)
+    debug('VQA interrogate: handler=moondream encoded_image')
     with devices.inference_context():
         if question == 'CAPTION':
             response = model.caption(image, length="short")['caption']
@@ -532,11 +769,13 @@ def moondream(question: str, image: Image.Image, repo: str = None):
         # model.detect(image, "face")
         # model.point(image, "person")
         # model.detect_gaze(image)
+    debug(f'VQA interrogate: handler=moondream response_before_clean="{response}"')
     return response
 
 
-def florence(question: str, image: Image.Image, repo: str = None, revision: str = None):
+def florence(question: str, image: Image.Image, repo: str = None, revision: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=florence model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     _get_imports = transformers.dynamic_module_utils.get_imports
 
     def get_imports(f):
@@ -580,22 +819,29 @@ def florence(question: str, image: Image.Image, repo: str = None, revision: str 
         task = question.split('>', 1)[0] + '>'
     else:
         task = '<MORE_DETAILED_CAPTION>'
+    debug(f'VQA interrogate: handler=florence task="{task}"')
     inputs = processor(text=task, images=image, return_tensors="pt")
     input_ids = inputs['input_ids'].to(devices.device)
     pixel_values = inputs['pixel_values'].to(devices.device, devices.dtype)
+    gen_kwargs = get_kwargs()
+    debug(f'VQA interrogate: handler=florence generation_kwargs={gen_kwargs}')
     with devices.inference_context():
         generated_ids = model.generate(
             input_ids=input_ids,
             pixel_values=pixel_values,
-            **get_kwargs()
+            **gen_kwargs
         )
+        debug(f'VQA interrogate: handler=florence generated_ids_shape={generated_ids.shape}')
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        debug(f'VQA interrogate: handler=florence generated_text="{generated_text}"')
         response = processor.post_process_generation(generated_text, task="task", image_size=(image.width, image.height))
+    debug(f'VQA interrogate: handler=florence response_before_clean="{response}"')
     return response
 
 
-def sa2(question: str, image: Image.Image, repo: str = None):
+def sa2(question: str, image: Image.Image, repo: str = None, model_name: str = None):
     global processor, model, loaded # pylint: disable=global-statement
+    debug(f'VQA interrogate: handler=sa2 model_name="{model_name}" repo="{repo}" question="{question}" image_size={image.size if image else None}')
     if model is None or loaded != repo:
         model = None
         model = transformers.AutoModel.from_pretrained(
@@ -617,6 +863,7 @@ def sa2(question: str, image: Image.Image, repo: str = None):
         task = question.split('>', 1)[0] + '>'
     else:
         task = '<MORE_DETAILED_CAPTION>'
+    debug(f'VQA interrogate: handler=sa2 task="{task}"')
     input_dict = {
         'image': image,
         'text': f'<image>{task}',
@@ -624,18 +871,21 @@ def sa2(question: str, image: Image.Image, repo: str = None):
         'mask_prompts': None,
         'tokenizer': processor,
         }
+    debug(f'VQA interrogate: handler=sa2 input_dict_keys={list(input_dict.keys())}')
     return_dict = model.predict_forward(**input_dict)
     response = return_dict["prediction"] # the text format answer
+    debug(f'VQA interrogate: handler=sa2 response_before_clean="{response}"')
     return response
 
 
-def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:Image.Image=None, model_name:str=None, quiet:bool=False):
+def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:Image.Image=None, model_name:str=None, prefill:str=None, thinking_mode:bool=False, quiet:bool=False):
     global quant_args # pylint: disable=global-statement
     jobid = shared.state.begin('Interrogate LLM')
     t0 = time.time()
     if quant_args is None:
         quant_args = model_quant.create_config(module='LLM')
     model_name = model_name or shared.opts.interrogate_vlm_model
+    prefill = prefill or vlm_prefill  # Use provided prefill or default
     if isinstance(image, list):
         image = image[0] if len(image) > 0 else None
     if isinstance(image, dict) and 'name' in image:
@@ -645,8 +895,12 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
             image.thumbnail((768, 768), Image.Resampling.LANCZOS)
         if image.mode != 'RGB':
             image = image.convert('RGB')
-    if prompt is not None and len(prompt) > 0:
-        question = prompt
+    # Handle flipped override logic
+    if question == "Use Prompt":
+        # Use content from Prompt field
+        question = prompt if (prompt is not None and len(prompt) > 0) else ""
+    # else: Predefined question was selected - use it, ignore prompt field
+    # Fallback for empty questions
     if len(question) < 2:
         question = "Describe the image."
 
@@ -659,6 +913,7 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
     from modules import modelloader
     modelloader.hf_login()
 
+    handler = 'unknown'
     try:
         if model_name is None:
             shared.log.error(f'Interrogate: type=vlm model="{model_name}" no model selected')
@@ -672,40 +927,60 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
         #     return ''
 
         if 'git' in vqa_model.lower():
-            answer = git(question, image, vqa_model)
+            handler = 'git'
+            answer = git(question, image, vqa_model, model_name)
         elif 'vilt' in vqa_model.lower():
-            answer = vilt(question, image, vqa_model)
+            handler = 'vilt'
+            answer = vilt(question, image, vqa_model, model_name)
         elif 'blip' in vqa_model.lower():
-            answer = blip(question, image, vqa_model)
+            handler = 'blip'
+            answer = blip(question, image, vqa_model, model_name)
         elif 'pix' in vqa_model.lower():
-            answer = pix(question, image, vqa_model)
+            handler = 'pix'
+            answer = pix(question, image, vqa_model, model_name)
+        elif 'moondream3' in vqa_model.lower():
+            handler = 'moondream3'
+            from modules.interrogate import moondream3
+            answer = moondream3.predict(question, image, vqa_model, model_name)
         elif 'moondream2' in vqa_model.lower():
-            answer = moondream(question, image, vqa_model)
+            handler = 'moondream'
+            answer = moondream(question, image, vqa_model, model_name)
         elif 'florence' in vqa_model.lower():
-            answer = florence(question, image, vqa_model)
-        elif 'qwen' in vqa_model.lower() or 'torii' in vqa_model.lower():
-            answer = qwen(question, image, vqa_model, system_prompt)
+            handler = 'florence'
+            answer = florence(question, image, vqa_model, None, model_name)
+        elif 'qwen' in vqa_model.lower() or 'torii' in vqa_model.lower() or 'mimo' in vqa_model.lower():
+            handler = 'qwen'
+            answer = qwen(question, image, vqa_model, system_prompt, model_name, prefill, thinking_mode)
         elif 'smol' in vqa_model.lower():
-            answer = smol(question, image, vqa_model, system_prompt)
+            handler = 'smol'
+            answer = smol(question, image, vqa_model, system_prompt, model_name, prefill, thinking_mode)
         elif 'joytag' in vqa_model.lower():
+            handler = 'joytag'
             from modules.interrogate import joytag
             answer = joytag.predict(image)
         elif 'joycaption' in vqa_model.lower():
+            handler = 'joycaption'
             from modules.interrogate import joycaption
             answer = joycaption.predict(question, image, vqa_model)
         elif 'deepseek' in vqa_model.lower():
+            handler = 'deepseek'
             from modules.interrogate import deepseek
             answer = deepseek.predict(question, image, vqa_model)
         elif 'paligemma' in vqa_model.lower():
-            answer = paligemma(question, image, vqa_model)
+            handler = 'paligemma'
+            answer = paligemma(question, image, vqa_model, model_name)
         elif 'gemma' in vqa_model.lower():
-            answer = gemma(question, image, vqa_model, system_prompt)
+            handler = 'gemma'
+            answer = gemma(question, image, vqa_model, system_prompt, model_name, prefill, thinking_mode)
         elif 'ovis' in vqa_model.lower():
-            answer = ovis(question, image, vqa_model)
+            handler = 'ovis'
+            answer = ovis(question, image, vqa_model, model_name)
         elif 'sa2' in vqa_model.lower():
-            answer = sa2(question, image, vqa_model)
+            handler = 'sa2'
+            answer = sa2(question, image, vqa_model, model_name)
         elif 'fastvlm' in vqa_model.lower():
-            answer = fastvlm(question, image, vqa_model)
+            handler = 'fastvlm'
+            answer = fastvlm(question, image, vqa_model, model_name)
         else:
             answer = 'unknown model'
     except Exception as e:
@@ -715,7 +990,8 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
     if shared.opts.interrogate_offload and model is not None:
         sd_models.move_model(model, devices.cpu, force=True)
     devices.torch_gc(force=True, reason='vqa')
-    answer = clean(answer, question)
+    answer = clean(answer, question, prefill)
+    debug(f'VQA interrogate: handler={handler} response_after_clean="{answer}"')
     t1 = time.time()
     if not quiet:
         shared.log.debug(f'Interrogate: type=vlm model="{model_name}" repo="{vqa_model}" args={get_kwargs()} time={t1-t0:.2f}')
@@ -723,7 +999,7 @@ def interrogate(question:str='', system_prompt:str=None, prompt:str=None, image:
     return answer
 
 
-def batch(model_name, system_prompt, batch_files, batch_folder, batch_str, question, prompt, write, append, recursive):
+def batch(model_name, system_prompt, batch_files, batch_folder, batch_str, question, prompt, write, append, recursive, prefill=None, thinking_mode=False):
     class BatchWriter:
         def __init__(self, folder, mode='w'):
             self.folder = folder
@@ -770,7 +1046,7 @@ def batch(model_name, system_prompt, batch_files, batch_folder, batch_str, quest
                 if shared.state.interrupted:
                     break
                 image = Image.open(file)
-                prompt = interrogate(question, system_prompt, prompt, image, model_name, quiet=True)
+                prompt = interrogate(question, system_prompt, prompt, image, model_name, prefill, thinking_mode, quiet=True)
                 prompts.append(prompt)
                 if write:
                     writer.add(file, prompt)
