@@ -16,6 +16,7 @@ exclude = [
     "modules/schedulers",
     "modules/teacache",
     "modules/seedvr",
+    "modules/sharpfin",
 
     "modules/control/proc",
     "modules/control/units",
