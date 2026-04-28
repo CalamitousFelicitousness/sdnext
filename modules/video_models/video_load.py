@@ -26,6 +26,10 @@ def load_custom(model_name: str):
     if 'veo-3.1' in model_name and 'google' in VIDEO_PROVIDERS:
         from modules.cloud.google_video import build_pipeline  # pylint: disable=import-outside-toplevel
         return build_pipeline(model_name)
+    if model_name.startswith('nanogpt:') and 'nanogpt' in VIDEO_PROVIDERS:
+        from modules.cloud.nanogpt_video import build_pipeline as build_nanogpt  # pylint: disable=import-outside-toplevel
+        model_id = model_name[len('nanogpt:'):]
+        return build_nanogpt(model_id)
     return None
 
 

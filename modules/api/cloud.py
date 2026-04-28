@@ -83,22 +83,28 @@ def get_providers() -> list[CloudProviderInfo]:
 def get_provider_models(provider_id: str) -> list[CloudModelInfo]:
     """List default model identifiers for a single provider.
 
-    Combines text and vision capabilities — a model is reported as vision-capable
-    if the provider exposes a vision handler that lists it.
+    Combines all capabilities — a model is reported with per-capability flags
+    for vision, streaming, image, and video support.
     """
     text_entry = get_handler('text', provider_id)
     vision_entry = get_handler('vision', provider_id)
-    if text_entry is None and vision_entry is None:
+    image_entry = get_handler('image', provider_id)
+    video_entry = get_handler('video', provider_id)
+    if text_entry is None and vision_entry is None and image_entry is None and video_entry is None:
         raise HTTPException(status_code=404, detail=f'Unknown provider: {provider_id}')
     text_models = set(list_models('text', provider_id))
     vision_models = set(list_models('vision', provider_id))
+    image_models = set(list_models('image', provider_id))
+    video_models = set(list_models('video', provider_id))
     streamer_supported = bool(text_entry and text_entry.get('stream'))
-    all_ids = sorted(text_models | vision_models)
+    all_ids = sorted(text_models | vision_models | image_models | video_models)
     return [
         CloudModelInfo(
             id=mid,
             supports_vision=mid in vision_models,
             supports_streaming=streamer_supported and mid in text_models,
+            supports_image=mid in image_models,
+            supports_video=mid in video_models,
         )
         for mid in all_ids
     ]

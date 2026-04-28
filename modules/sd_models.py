@@ -52,6 +52,7 @@ pipe_switch_task_exclude = [
     'AuraFlowPipeline',
     'ChronoEditPipeline',
     'GoogleNanoBananaPipeline',
+    'NanoGPTImagePipeline',
 ]
 i2i_pipes = [
     'LEditsPPPipelineStableDiffusion', 'LEditsPPPipelineStableDiffusionXL',
@@ -505,6 +506,10 @@ def load_diffuser_force(detected_model_type, checkpoint_info, diffusers_load_con
         elif model_type in ['NanoBanana']:
             from pipelines.model_google import load_nanobanana
             sd_model = load_nanobanana(checkpoint_info, diffusers_load_config)
+            allow_post_quant = False
+        elif model_type in ['NanoGPTImage']:
+            from pipelines.model_nanogpt import load_nanogpt_image
+            sd_model = load_nanogpt_image(checkpoint_info, diffusers_load_config)
             allow_post_quant = False
         elif model_type in ['PRX']:
             from pipelines.model_prx import load_prx

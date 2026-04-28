@@ -16,6 +16,8 @@ class CloudModelInfo(BaseModel):
     label: Optional[str] = Field(None, description="Optional human-readable label")
     supports_vision: bool = Field(False, description="Whether the model accepts image inputs")
     supports_streaming: bool = Field(False, description="Whether the model supports SSE streaming via this framework")
+    supports_image: bool = Field(False, description="Whether the model supports image generation")
+    supports_video: bool = Field(False, description="Whether the model supports video generation")
 
 
 class CloudTextRequest(BaseModel):

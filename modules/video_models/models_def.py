@@ -621,6 +621,20 @@ try:
                 te_cls=None,
                 dit_cls=None),
         ],
+        'NanoGPT': [
+            Model(name='NanoGPT Veo 3.1 T2V', url='https://nano-gpt.com', repo='nanogpt:veo3-1-video', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Sora 2 T2V', url='https://nano-gpt.com', repo='nanogpt:sora-2', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Kling 3.0 T2V', url='https://nano-gpt.com', repo='nanogpt:kling-v30-pro', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Wan 2.7 T2V', url='https://nano-gpt.com', repo='nanogpt:wan-2.7-video', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Hailuo 2.3 T2V', url='https://nano-gpt.com', repo='nanogpt:minimax-hailuo-23-pro', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Hunyuan T2V', url='https://nano-gpt.com', repo='nanogpt:hunyuan-video-15', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Seedance 2.0 T2V', url='https://nano-gpt.com', repo='nanogpt:bytedance-seedance-2-0', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Pixverse v6 T2V', url='https://nano-gpt.com', repo='nanogpt:pixverse-v6', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Runway Gen-4 T2V', url='https://nano-gpt.com', repo='nanogpt:runwayml-gen4-aleph', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Kling 2.1 I2V', url='https://nano-gpt.com', repo='nanogpt:kling-v21-pro', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Hunyuan I2V', url='https://nano-gpt.com', repo='nanogpt:hunyuan-video-image-to-video', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+            Model(name='NanoGPT Wan I2V', url='https://nano-gpt.com', repo='nanogpt:wan-video-image-to-video', custom='NanoGPTVideoPipeline', repo_cls=None, te_cls=None, dit_cls=None),
+        ],
     }
     t1 = time.time()
     errors = 0

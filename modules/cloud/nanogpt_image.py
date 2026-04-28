@@ -21,6 +21,7 @@ polling, while the upstream task continues to bill — same contract as Veo).
 from __future__ import annotations
 import base64
 import io
+import time
 from typing import TYPE_CHECKING
 from PIL import Image
 from modules.logger import log
@@ -33,7 +34,7 @@ from modules.cloud.nanogpt import (
     is_enabled,
     list_models_cached,
 )
-from modules.cloud.types import ImageRequest, ImageResponse, Job
+from modules.cloud.types import ImageRequest, ImageResponse, Job, TERMINAL_JOB_STATUSES
 from modules.cloud.registry import register_image
 
 
@@ -79,9 +80,9 @@ def build_body(req: ImageRequest) -> dict:
     if req.strength is not None:
         body['strength'] = float(req.strength)
     if req.init_image is not None:
-        body['imageDataUrl'] = client.image_to_data_url(req.init_image, max_dim=2048)
+        body['imageDataUrl'] = client.image_to_data_url(req.init_image, max_dim=2048, max_bytes=4_000_000)
     if req.mask is not None:
-        body['maskDataUrl'] = client.image_to_data_url(req.mask, max_dim=2048)
+        body['maskDataUrl'] = client.image_to_data_url(req.mask, max_dim=2048, max_bytes=4_000_000)
     extra = req.extra or {}
     body.update(extra)
     return body
@@ -207,6 +208,48 @@ async def poll(job: Job) -> None:
         else:  # PENDING, NOT_START, SUBMITTED, UNKNOWN, ''
             job.status = 'submitted'
             job.message = status.lower() or 'pending'
+
+
+class NanoGPTImagePipeline:
+    """Sync wrapper preserving the ``shared.sd_model(**base_args)`` contract.
+
+    Submits a Job via the cloud framework, polls JOBS until terminal, returns
+    the first PIL image on success or ``None`` on failure / cancellation /
+    timeout. ``processing_args.get_params`` introspection ensures the pipeline
+    only receives ``prompt``, ``width``, ``height``, and ``image`` from the
+    standard diffusers args dict.
+    """
+
+    def __init__(self, model_name: str):
+        self.model = model_name
+        log.debug(f'Load model: type=NanoGPTImage model="{model_name}"')
+
+    def __call__(self, prompt, width: int, height: int, image=None):
+        from modules.cloud import jobs  # pylint: disable=import-outside-toplevel
+        from modules import shared  # pylint: disable=import-outside-toplevel
+        text = prompt[0] if isinstance(prompt, (list, tuple)) and prompt else (prompt or '')
+        req = ImageRequest(model=self.model, prompt=text, width=width, height=height, init_image=image)
+        job = jobs.submit_job('image', PROVIDER_ID, req)
+        watchdog = float(getattr(shared.opts, 'cloud_job_max_duration', 600.0)) + 30.0
+        deadline = time.time() + watchdog
+        while time.time() < deadline:
+            current = jobs.get_job(job.id)
+            if current is None:
+                return None
+            if current.status in TERMINAL_JOB_STATUSES:
+                if current.status == 'succeeded' and current.result is not None and current.result.images:
+                    return current.result.images[0]
+                if current.error:
+                    log.warning(f'Cloud: provider={PROVIDER_ID} job={job.id} error={current.error}')
+                return None
+            time.sleep(2)
+        log.warning(f'Cloud: provider={PROVIDER_ID} job={job.id} watchdog timed out — cancelling')
+        jobs.cancel_job(job.id)
+        return None
+
+
+def build_pipeline(model_name: str) -> NanoGPTImagePipeline:
+    return NanoGPTImagePipeline(model_name)
 
 
 register_image(

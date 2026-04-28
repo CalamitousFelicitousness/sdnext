@@ -19,5 +19,65 @@
     "preview": "gemini-3-pro-image-preview.jpg",
     "tags": "cloud",
     "skip": true
+  },
+  "NanoGPT Nano Banana 2": {
+    "path": "nanogpt:nano-banana-2",
+    "desc": "Google Nano Banana 2 (Gemini 3.1 Flash Image) via NanoGPT — fast text-to-image and image editing with up to 4K output",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT GPT Image 1.5": {
+    "path": "nanogpt:gpt-image-1.5",
+    "desc": "OpenAI's latest image model via NanoGPT — improved instruction following, text rendering and iterative editing",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Seedream 4.5": {
+    "path": "nanogpt:seedream-v4.5",
+    "desc": "Bytedance Seedream 4.5 via NanoGPT — high-quality text-to-image generation",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Hidream": {
+    "path": "nanogpt:hidream",
+    "desc": "Hidream via NanoGPT — text-to-image generation",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Flux 2 Pro": {
+    "path": "nanogpt:flux-2-pro",
+    "desc": "Black Forest Labs FLUX 2 Pro via NanoGPT — professional text-to-image and image-to-image",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Flux Kontext": {
+    "path": "nanogpt:flux-kontext",
+    "desc": "Black Forest Labs FLUX Kontext via NanoGPT — multi-image contextual editing and generation",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Imagen 4": {
+    "path": "nanogpt:imagen-4",
+    "desc": "Google Imagen 4 via NanoGPT — high-fidelity text-to-image generation",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Hunyuan Image 3": {
+    "path": "nanogpt:hunyuan-image-3",
+    "desc": "Tencent Hunyuan Image 3 via NanoGPT — text-to-image and instruction-based editing",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Recraft v4": {
+    "path": "nanogpt:recraft-v4",
+    "desc": "Recraft v4 via NanoGPT — professional-grade text-to-image with style control",
+    "tags": "cloud",
+    "skip": true
+  },
+  "NanoGPT Qwen Image 2.0 Pro": {
+    "path": "nanogpt:qwen-image-2.0-pro",
+    "desc": "Alibaba Qwen Image 2.0 Pro via NanoGPT — text-to-image generation",
+    "tags": "cloud",
+    "skip": true
   }
 }

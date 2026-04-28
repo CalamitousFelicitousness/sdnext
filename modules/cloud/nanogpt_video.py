@@ -25,6 +25,7 @@ Optional fields are gathered from ``req.extra`` so per-model knobs (Veo
 without a per-model schema.
 """
 from __future__ import annotations
+import time
 from modules.logger import log
 from modules.cloud import client, client_async
 from modules.cloud.nanogpt import (
@@ -34,7 +35,7 @@ from modules.cloud.nanogpt import (
     is_enabled,
     list_models_cached,
 )
-from modules.cloud.types import VideoRequest, VideoResponse, Job
+from modules.cloud.types import VideoRequest, VideoResponse, Job, TERMINAL_JOB_STATUSES
 from modules.cloud.registry import register_video
 
 
@@ -97,7 +98,7 @@ def build_body(req: VideoRequest) -> dict:
     if req.seed is not None:
         body['seed'] = req.seed
     if req.image is not None:
-        body['imageDataUrl'] = client.image_to_data_url(req.image, max_dim=2048)
+        body['imageDataUrl'] = client.image_to_data_url(req.image, max_dim=2048, max_bytes=4_000_000)
     extra = req.extra or {}
     if 'negative_prompt' in extra:
         body['negative_prompt'] = extra['negative_prompt']
@@ -216,6 +217,47 @@ async def poll(job: Job) -> None:
             # Unknown status — keep job alive in 'running' so we re-poll rather than terminate spuriously
             job.status = 'running'
             job.message = (status or 'unknown').lower()
+
+
+class NanoGPTVideoPipeline:
+    """Sync wrapper preserving the ``video_run.generate`` contract.
+
+    Submits a Job via the cloud framework, polls JOBS until terminal, returns
+    ``{'bytes': video_bytes, 'images': []}`` on success (read by
+    ``video_save.save_video(binary=processed.bytes)``), or ``None`` on
+    failure / cancellation / timeout.
+    """
+
+    def __init__(self, model_name: str):
+        self.model = model_name
+        log.debug(f'Load model: type=NanoGPTVideo model="{model_name}"')
+
+    def __call__(self, prompt, width: int, height: int, image=None, num_frames=96):
+        from modules.cloud import jobs  # pylint: disable=import-outside-toplevel
+        from modules import shared  # pylint: disable=import-outside-toplevel
+        text = prompt[0] if isinstance(prompt, (list, tuple)) and prompt else (prompt or '')
+        req = VideoRequest(model=self.model, prompt=text, width=width, height=height, image=image, num_frames=num_frames)
+        job = jobs.submit_job('video', PROVIDER_ID, req)
+        watchdog = float(getattr(shared.opts, 'cloud_job_max_duration', 600.0)) + 30.0
+        deadline = time.time() + watchdog
+        while time.time() < deadline:
+            current = jobs.get_job(job.id)
+            if current is None:
+                return None
+            if current.status in TERMINAL_JOB_STATUSES:
+                if current.status == 'succeeded' and current.result is not None and current.result.video_bytes:
+                    return {'bytes': current.result.video_bytes, 'images': []}
+                if current.error:
+                    log.warning(f'Cloud: provider={PROVIDER_ID} job={job.id} error={current.error}')
+                return None
+            time.sleep(2)
+        log.warning(f'Cloud: provider={PROVIDER_ID} job={job.id} watchdog timed out — cancelling')
+        jobs.cancel_job(job.id)
+        return None
+
+
+def build_pipeline(model_name: str) -> NanoGPTVideoPipeline:
+    return NanoGPTVideoPipeline(model_name)
 
 
 register_video(

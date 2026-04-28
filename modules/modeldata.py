@@ -140,6 +140,10 @@ def get_model_type(pipe):
         model_type = 'veo3'
     elif 'NanoBanana' in name:
         model_type = 'nanobanana'
+    elif 'NanoGPTImage' in name:
+        model_type = 'nanogpt'
+    elif 'NanoGPTVideo' in name:
+        model_type = 'nanogpt'
     else:
         model_type = name
     return model_type

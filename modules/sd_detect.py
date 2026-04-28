@@ -140,6 +140,8 @@ def guess_by_name(fn, current_guess):
         new_guess = 'StableVideoDiffusion'
     elif 'prx-' in fn.lower():
         new_guess = 'PRX'
+    elif fn.lower().startswith('nanogpt:'):
+        new_guess = 'NanoGPTImage'
     elif 'gemini-' in fn.lower() and 'image' in fn.lower():
         new_guess = 'NanoBanana'
     elif 'ernie-image' in fn.lower():
