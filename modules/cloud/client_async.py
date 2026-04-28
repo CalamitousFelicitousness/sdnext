@@ -45,6 +45,25 @@ async def post_json_async(client: httpx.AsyncClient, url: str, headers: dict, bo
     raise last_exc if last_exc else RuntimeError("post_json_async failed")
 
 
+async def get_json_async(client: httpx.AsyncClient, url: str, headers: dict,
+                         *, params: Optional[dict] = None, retries: int = 2) -> dict:
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code >= 400:
+                text = resp.text[:500] if resp.text else ''
+                raise RuntimeError(f"HTTP {resp.status_code}: {text}")
+            return resp.json()
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                log.debug(f'Cloud: get_json_async retry attempt={attempt + 1} url={url} error={e}')
+            else:
+                log.error(f'Cloud: get_json_async failed url={url} error={e}')
+    raise last_exc if last_exc else RuntimeError("get_json_async failed")
+
+
 async def download_async(client: httpx.AsyncClient, url: str, headers: Optional[dict] = None,
                          *, timeout: float = 120.0) -> bytes:
     resp = await client.get(url, headers=headers or {}, timeout=timeout)

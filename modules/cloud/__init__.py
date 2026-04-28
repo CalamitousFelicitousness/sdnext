@@ -117,3 +117,5 @@ from modules.cloud import anthropic  # pylint: disable=wrong-import-position
 from modules.cloud import google  # pylint: disable=wrong-import-position
 from modules.cloud import google_image  # pylint: disable=wrong-import-position
 from modules.cloud import google_video  # pylint: disable=wrong-import-position
+from modules.cloud import nanogpt_image  # pylint: disable=wrong-import-position
+from modules.cloud import nanogpt_video  # pylint: disable=wrong-import-position

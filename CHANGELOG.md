@@ -179,6 +179,10 @@ For full details, see [ChangeLog](https://github.com/vladmandic/automatic/blob/m
   - new WebSocket channel at `/sdapi/v1/ws` broadcasts `cloud.job.created` / `cloud.job.progress` / `cloud.job.terminal` events from any thread
   - new REST endpoints: `POST /sdapi/v1/cloud/image`, `POST /sdapi/v1/cloud/video`, `GET /sdapi/v1/cloud/jobs` *(filterable by `?capability=` and `?status=`)*, `GET /sdapi/v1/cloud/jobs/{id}`, `POST /sdapi/v1/cloud/jobs/{id}/cancel`
   - new settings under *Cloud Providers → Cloud Jobs*: `cloud_job_poll_default`, `cloud_job_max_duration`, `cloud_job_history_size`
+  - **NanoGPT** image generation provider — async-mode registration that handles both the inline-response path (`gpt-image-1.5`, `nano-banana-2`, `seedream-v4.5`, `hidream`, `flux-2-pro`, `flux-kontext`, ...) and Midjourney's task-poll path (`midjourney-*` models against `POST /api/check-midjourney-status`) through a single handler
+  - **NanoGPT** video generation provider — async-mode registration covering ~100 models across Veo (incl. 3.1), Sora 2, Kling (incl. 3.0 + motion-control), MiniMax / Hailuo (incl. 2.3), Hunyuan, Wan/Wavespeed (incl. 2.7), Bytedance Seedance (incl. 2.0), Pixverse v6, Lightricks LTX-2, Vidu Q3, Runway Gen-4, plus core utility (upscalers, music-video) — supports I2V via init image, Veo 3 audio generation (`generateAudio`), pro mode, `cfg_scale`, `negative_prompt`, and `num_frames`/`frames_per_second`/`camera_fixed` passthrough via `request.extra`
+  - dynamic NanoGPT model discovery against the public `/api/v1/{image,video}-models` endpoints (no auth required) with 1-hour cache and a curated static fallback for offline use; specialty pipelines (avatar / lipsync / face-swap / longstories) are filtered from the dropdown because they require per-model UI surface beyond the standard request envelope
+  - new async helper `client_async.get_json_async` for GET-with-params polling endpoints (used by NanoGPT video status; future providers like Civitai and BFL will reuse)
 
 ## Update for 2026-04-01
 
