@@ -226,9 +226,19 @@ def list_models_cached(capability: str, fallback: tuple[str, ...]) -> list[str]:
 
 
 def get_model_resolutions(model_id: str) -> list[str]:
-    """Return supported resolution strings for a NanoGPT image model from the discovery cache."""
+    """Return supported resolution strings for a NanoGPT image model from the discovery cache.
+
+    Triggers a cache population if the resolution map is empty (first call
+    before any list_models_cached invocation).
+    """
     with CACHE_LOCK:
-        return list((CACHE.get('image', {}).get('resolutions') or {}).get(model_id, []))
+        resolutions = (CACHE.get('image', {}).get('resolutions') or {})
+        if resolutions:
+            return list(resolutions.get(model_id, []))
+    list_models_cached('image', IMAGE_FALLBACK_MODELS)
+    with CACHE_LOCK:
+        resolutions = (CACHE.get('image', {}).get('resolutions') or {})
+        return list(resolutions.get(model_id, []))
 
 
 def reset_cache() -> None:
