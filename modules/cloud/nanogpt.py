@@ -134,7 +134,7 @@ VIDEO_FALLBACK_MODELS = (
 
 
 CACHE: dict = {
-    'image': {'models': None, 'ts': 0.0},
+    'image': {'models': None, 'resolutions': {}, 'ts': 0.0},
     'video': {'models': None, 'ts': 0.0},
 }
 CACHE_LOCK = threading.Lock()
@@ -164,8 +164,13 @@ def filter_utility_only(model_ids: list[str]) -> list[str]:
     return out
 
 
-def fetch_models(capability: str) -> Optional[list[str]]:
-    """Fetch live model IDs from NanoGPT discovery; returns None on failure."""
+def fetch_models(capability: str) -> Optional[tuple[list[str], dict[str, list[str]]]]:
+    """Fetch live model IDs and per-model resolutions from NanoGPT discovery.
+
+    Returns ``(ids, resolutions_map)`` on success, ``None`` on failure.
+    ``resolutions_map`` maps model id → list of accepted resolution strings
+    (only populated when the model entry includes ``supported_parameters.resolutions``).
+    """
     url = f'{V1_BASE}/{capability}-models'
     try:
         resp = requests.get(url, timeout=DISCOVERY_TIMEOUT)
@@ -181,10 +186,17 @@ def fetch_models(capability: str) -> Optional[list[str]]:
         log.debug(f'NanoGPT discovery: {url} unexpected payload shape')
         return None
     ids: list[str] = []
+    resolutions: dict[str, list[str]] = {}
     for entry in data:
-        if isinstance(entry, dict) and entry.get('id'):
-            ids.append(str(entry['id']))
-    return ids
+        if not isinstance(entry, dict) or not entry.get('id'):
+            continue
+        mid = str(entry['id'])
+        ids.append(mid)
+        params = entry.get('supported_parameters') or {}
+        res_list = params.get('resolutions')
+        if isinstance(res_list, list) and res_list:
+            resolutions[mid] = [str(r) for r in res_list]
+    return ids, resolutions
 
 
 def list_models_cached(capability: str, fallback: tuple[str, ...]) -> list[str]:
@@ -196,14 +208,16 @@ def list_models_cached(capability: str, fallback: tuple[str, ...]) -> list[str]:
         ts = cached.get('ts') or 0.0
         if models is not None and (now - ts) < DISCOVERY_CACHE_TTL:
             return list(models)
-    fresh = fetch_models(capability)
-    if fresh:
-        filtered = filter_utility_only(fresh)
+    result = fetch_models(capability)
+    if result is not None:
+        ids, resolutions = result
+        filtered = filter_utility_only(ids)
         with CACHE_LOCK:
             CACHE[capability]['models'] = filtered
             CACHE[capability]['ts'] = now
+            if resolutions:
+                CACHE[capability]['resolutions'] = resolutions
         return list(filtered)
-    # discovery failed: prefer stale cache over curated fallback
     with CACHE_LOCK:
         stale = (CACHE.get(capability) or {}).get('models')
     if stale:
@@ -211,9 +225,17 @@ def list_models_cached(capability: str, fallback: tuple[str, ...]) -> list[str]:
     return list(fallback)
 
 
+def get_model_resolutions(model_id: str) -> list[str]:
+    """Return supported resolution strings for a NanoGPT image model from the discovery cache."""
+    with CACHE_LOCK:
+        return list((CACHE.get('image', {}).get('resolutions') or {}).get(model_id, []))
+
+
 def reset_cache() -> None:
-    """Wipe the discovery cache (e.g. when nanogpt_key changes — though discovery is unauth)."""
+    """Wipe the discovery cache."""
     with CACHE_LOCK:
         for cap in CACHE:
             CACHE[cap]['models'] = None
             CACHE[cap]['ts'] = 0.0
+            if 'resolutions' in CACHE[cap]:
+                CACHE[cap]['resolutions'] = {}

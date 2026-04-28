@@ -123,3 +123,72 @@ def image_to_data_url(img: 'PILImage.Image', *, max_dim: int = 2048, mime: str =
     budget = max(0, max_bytes - len(prefix)) if max_bytes > 0 else 0
     b64 = image_to_base64(img, max_dim=max_dim, image_format=image_format, max_bytes=budget)
     return f'{prefix}{b64}'
+
+
+def parse_resolution(res: str) -> 'tuple[int, int] | None':
+    """Parse a resolution string into (width, height) pixels.
+
+    Handles five format families:
+      WxH (``1024x1024``), W*H (``1024*1024``), W:H ratio (``16:9``),
+      K-suffix (``2k``), p-suffix (``1080p``), bare digit (``1024``).
+    Returns None for tokens that carry no pixel information (``auto``, ``default``).
+    """
+    if not res or not isinstance(res, str):
+        return None
+    for sep in ('x', '*'):
+        if sep in res:
+            parts = res.split(sep, 1)
+            if parts[0].isdigit() and parts[1].isdigit():
+                return (int(parts[0]), int(parts[1]))
+    if ':' in res:
+        parts = res.split(':', 1)
+        if parts[0].isdigit() and parts[1].isdigit():
+            w, h = int(parts[0]), int(parts[1])
+            scale = 1024 / max(w, h, 1)
+            return (int(w * scale), int(h * scale))
+    lower = res.lower().strip()
+    k_map = {'1k': 1024, '2k': 2048, '4k': 4096, '8k': 8192}
+    if lower in k_map:
+        dim = k_map[lower]
+        return (dim, dim)
+    p_map = {'1080p': (1920, 1080), '720p': (1280, 720), '480p': (854, 480)}
+    if lower in p_map:
+        return p_map[lower]
+    if res.isdigit():
+        return (int(res), int(res))
+    return None
+
+
+def closest_resolution(width: int, height: int, resolutions: list[str]) -> str:
+    """Pick the resolution string from *resolutions* closest to (width, height).
+
+    Comparison is done in pixel space after parsing each candidate. Aspect ratio
+    proximity is weighted 5x over pixel-count proximity so the mapper favours
+    the right shape over the right size. Returns the provider's original token.
+
+    Fallbacks: empty list → ``'{width}x{height}'``; all-unparseable → ``'auto'``
+    if present, else first item.
+    """
+    if not resolutions:
+        return f'{width}x{height}'
+    candidates: list[tuple[str, tuple[int, int]]] = []
+    for res in resolutions:
+        dims = parse_resolution(res)
+        if dims:
+            candidates.append((res, dims))
+    if not candidates:
+        if 'auto' in resolutions:
+            return 'auto'
+        return resolutions[0]
+    target_ar = (width or 1) / max(height or 1, 1)
+    target_px = (width or 1024) * (height or 1024)
+
+    def score(entry):
+        cw, ch = entry[1]
+        ar = cw / max(ch, 1)
+        px = cw * ch
+        ar_diff = abs(ar - target_ar) / max(target_ar, 0.01)
+        px_ratio = max(px, target_px) / max(min(px, target_px), 1) - 1
+        return ar_diff * 5 + px_ratio
+
+    return min(candidates, key=score)[0]

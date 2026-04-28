@@ -47,16 +47,9 @@ LABEL = 'NanoGPT'
 
 DEFAULT_POLL_INTERVAL = 5.0
 
-SIZE_BUCKETS = ('256x256', '512x512', '1024x1024')
-
 
 def list_default_models() -> list[str]:
     return list_models_cached('image', IMAGE_FALLBACK_MODELS)
-
-
-def closest_size(width: int, height: int) -> str:
-    target = max(width or 0, height or 0) or 1024
-    return min(SIZE_BUCKETS, key=lambda s: abs(int(s.split('x')[0]) - target))
 
 
 def is_midjourney(model: str) -> bool:
@@ -64,11 +57,13 @@ def is_midjourney(model: str) -> bool:
 
 
 def build_body(req: ImageRequest) -> dict:
+    from modules.cloud.nanogpt import get_model_resolutions  # pylint: disable=import-outside-toplevel
+    model_resolutions = get_model_resolutions(req.model)
     body: dict = {
         'model': req.model,
         'prompt': req.prompt,
         'n': max(1, int(req.num_images or 1)),
-        'size': closest_size(req.width, req.height),
+        'size': client.closest_resolution(req.width, req.height, model_resolutions),
         'response_format': 'b64_json',
     }
     if req.seed is not None:
