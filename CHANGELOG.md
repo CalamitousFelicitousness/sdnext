@@ -161,6 +161,24 @@ For full details, see [ChangeLog](https://github.com/vladmandic/automatic/blob/m
   - preserve `image.info`
   - color grading preserve metadata
   - resolve video output path
+- **Cloud Providers**
+  - new `modules/cloud/` framework with capability registries for **text**, **vision**, **image**, and **video**
+  - presets-based OpenAI-compatible client covering **OpenAI**, **OpenRouter**, **NanoGPT**, **AIHubMix**, **HuggingFace Inference Providers**, plus a **Custom OpenAI-compat** entry for arbitrary base URLs
+  - native **Anthropic** provider (`/v1/messages`), no SDK dependency
+  - migrated existing **Google Gemini** integration into the registry; Gemini text and vision flow through the same dispatcher as the new providers
+  - SSE streaming for prompt-enhance via `shared.state.textinfo` (provider-supported only; falls back to non-streaming on error)
+  - new **Cloud Providers** settings section consolidates all cloud credentials and per-feature defaults; existing `google_*` settings keep their stored values and move to this section
+  - new REST endpoints: `GET /sdapi/v1/cloud/providers`, `GET /sdapi/v1/cloud/providers/{id}/models`, `POST /sdapi/v1/cloud/text`, `POST /sdapi/v1/cloud/vision`, `POST /sdapi/v1/cloud/text/stream` *(SSE)*
+  - `GET /sdapi/v1/vqa/models` now reports a `provider` field and a `cloud` capability flag for cloud-routed VLMs
+  - prompt-enhance dropdown gains representative cloud entries: `anthropic/claude-*`, `openai/gpt-4o*`, `openrouter/<vendor>/<model>` *(custom values still accepted)*
+- **Cloud Jobs** *(Phase 2 — async image and video generation framework)*
+  - new in-memory job manager (`modules/cloud/jobs.py`) — every cloud image/video generation runs on its own worker thread + asyncio loop, observes `shared.state.interrupted`, and respects a `cloud_job_max_duration` watchdog
+  - dual handler contract on `register_image()` / `register_video()`: `mode='sync'` for one-shot providers (`predict`), `mode='async'` for long-poll providers (`submit` / `poll` / `cancel`); cancellation is fire-and-forget between polls
+  - **Google NanoBanana** image pipeline relocated from `pipelines/model_google.py` to `modules/cloud/google_image.py` (sync mode); legacy class name `GoogleNanoBananaPipeline` preserved so literal-name dispatch in `sd_models.py` / `processing_args.py` keeps working
+  - **Google Veo** video pipeline relocated from `modules/video_models/google_veo.py` to `modules/cloud/google_video.py` (async mode, 10s poll interval); the synchronous UI path now flows through the framework — interrupts are observed mid-generation and cancellation is dispatched to `client.operations.cancel`
+  - new WebSocket channel at `/sdapi/v1/ws` broadcasts `cloud.job.created` / `cloud.job.progress` / `cloud.job.terminal` events from any thread
+  - new REST endpoints: `POST /sdapi/v1/cloud/image`, `POST /sdapi/v1/cloud/video`, `GET /sdapi/v1/cloud/jobs` *(filterable by `?capability=` and `?status=`)*, `GET /sdapi/v1/cloud/jobs/{id}`, `POST /sdapi/v1/cloud/jobs/{id}/cancel`
+  - new settings under *Cloud Providers → Cloud Jobs*: `cloud_job_poll_default`, `cloud_job_max_duration`, `cloud_job_history_size`
 
 ## Update for 2026-04-01
 

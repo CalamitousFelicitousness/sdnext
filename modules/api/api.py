@@ -115,6 +115,14 @@ class Api:
         from modules.api import caption
         caption.register_api(self)
 
+        # cloud providers api
+        from modules.api import cloud as cloud_api
+        cloud_api.register_api(self)
+
+        # cloud websocket channel
+        from modules.api import ws as cloud_ws
+        cloud_ws.register_api(self.app)
+
         # lora api
         from modules.api import loras
         loras.register_api(self)

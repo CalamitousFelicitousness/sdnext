@@ -34,7 +34,8 @@ def b64(image):
 def is_cloud_model(model_name: str) -> bool:
     if not model_name:
         return False
-    return model_name in Options.cloud
+    from modules.caption.models_def import resolve_provider
+    return resolve_provider(model_name) is not None
 
 
 def is_vision_model(model_name: str) -> bool:
@@ -166,10 +167,7 @@ class Options:
         'coder3101/Ministral-3-8B-Reasoning-2512-heretic',
         'coder3101/Ministral-3-14B-Reasoning-2512-heretic',
     ]
-    cloud = [
-        'google/gemini-3.1-pro-preview',
-        'google/gemini-3-flash-preview',
-    ]
+    cloud = []  # populated post-class from registry
     models = {
         # Gemma
         'google/gemma-3-1b-it': {},
@@ -243,6 +241,19 @@ class Options:
         'google/gemini-3-flash-preview': {},
         'google/gemini-2.5-pro': {},
         'google/gemini-2.5-flash': {},
+        # Anthropic native
+        'anthropic/claude-opus-4-7': {},
+        'anthropic/claude-sonnet-4-6': {},
+        'anthropic/claude-haiku-4-5-20251001': {},
+        'anthropic/claude-3-5-sonnet-20241022': {},
+        # OpenAI native
+        'openai/gpt-4o': {},
+        'openai/gpt-4o-mini': {},
+        'openai/gpt-4.1-mini': {},
+        # OpenRouter (route format)
+        'openrouter/anthropic/claude-3.5-sonnet': {},
+        'openrouter/openai/gpt-4o-mini': {},
+        'openrouter/meta-llama/llama-3.3-70b-instruct': {},
         # SmolLM
         'HuggingFaceTB/SmolLM2-135M-Instruct': {},
         'HuggingFaceTB/SmolLM2-360M-Instruct': {},
@@ -304,6 +315,15 @@ class Options:
     def get_default_display():
         """Return display name for default model."""
         return get_model_display_name(Options.default)
+
+
+def populate_options_cloud():
+    """Derive Options.cloud from the cloud provider registry."""
+    from modules.caption.models_def import resolve_provider
+    Options.cloud = [m for m in Options.models if resolve_provider(m) is not None]
+
+
+populate_options_cloud()
 
 
 class PromptEnhanceScript(scripts_manager.Script):
@@ -693,22 +713,54 @@ class PromptEnhanceScript(scripts_manager.Script):
         self.busy = True
 
         if is_cloud_model(model):
-            if 'gemini' in model:
-                from modules.caption import gemini
-                kwargs = {
-                    'temperature': temperature,
-                    'max_output_tokens': tokens,
-                }
-                model_name = model.replace('google/', '')
-                response = gemini.predict(prompt_text, current_image, model_name, system, model, prefill_text, thinking, kwargs)
-                t1 = time.time()
-                log.info(f'Prompt enhance: model="{model}" nsfw={nsfw} time={t1-t0:.2f} temperature={temperature} prefill="{prefill_text[:20] if prefill_text else None}" response={len(response)}')
-                debug_log(f'Prompt enhance: response="{response}"')
+            from modules.caption.models_def import resolve_provider, strip_provider_prefix
+            from modules.cloud import predict_text, predict_vision, stream_text, TextRequest, VisionRequest, get_handler
+            provider_id = resolve_provider(model)
+            if not provider_id:
                 self.busy = False
-                return response
-
+                return f'Error: cannot resolve provider for {model}'
+            clean_model = strip_provider_prefix(model, provider_id)
+            has_image = current_image is not None and is_vision_model(model)
+            if has_image:
+                vreq = VisionRequest(
+                    model=clean_model, prompt=prompt_text, system=system,
+                    prefill=prefill_text, thinking=thinking, image=current_image,
+                    temperature=temperature, max_tokens=tokens, top_p=top_p, top_k=top_k,
+                )
+                resp = predict_vision(provider_id, vreq)
+                response = resp.text if not resp.error else f'Error: {resp.error}'
             else:
-                return 'Model not recognized'
+                streaming_enabled = bool(getattr(shared.opts, 'cloud_streaming_enabled', True))
+                handler = get_handler('text', provider_id) or {}
+                streamer_supported = handler.get('stream') is not None
+                treq = TextRequest(
+                    model=clean_model, prompt=prompt_text, system=system,
+                    prefill=prefill_text, thinking=thinking,
+                    temperature=temperature, max_tokens=tokens, top_p=top_p, top_k=top_k,
+                    stream=streaming_enabled and streamer_supported,
+                )
+                if streaming_enabled and streamer_supported:
+                    buf: list[str] = []
+                    try:
+                        for chunk in stream_text(provider_id, treq):
+                            buf.append(chunk)
+                            shared.state.textinfo = f'cloud:{provider_id}: {"".join(buf)[-200:]}'
+                        response = ''.join(buf)
+                        if not response:
+                            raise RuntimeError('empty stream')
+                    except Exception as stream_exc:
+                        log.warning(f'Cloud stream failed for {provider_id}: {stream_exc}; falling back to non-streaming')
+                        treq.stream = False
+                        resp = predict_text(provider_id, treq)
+                        response = resp.text if not resp.error else f'Error: {resp.error}'
+                else:
+                    resp = predict_text(provider_id, treq)
+                    response = resp.text if not resp.error else f'Error: {resp.error}'
+            t1 = time.time()
+            log.info(f'Prompt enhance: provider={provider_id} model="{model}" nsfw={nsfw} time={t1-t0:.2f} temperature={temperature} prefill="{prefill_text[:20] if prefill_text else None}" response={len(response)}')
+            debug_log(f'Prompt enhance: response="{response}"')
+            self.busy = False
+            return response
 
         try:
             # Qwen3.5 uses native enable_thinking parameter in the chat template

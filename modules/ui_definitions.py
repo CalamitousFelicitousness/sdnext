@@ -95,11 +95,6 @@ def create_settings(cmd_opts):
     options_templates.update(options_section(('model_options', "Model Options"), {
         "model_modular_sep": OptionInfo("<h2>Modular Pipelines</h2>", "", gr.HTML),
         "model_modular_enable": OptionInfo(False, "Enable modular pipelines (experimental)"),
-        "model_google_sep": OptionInfo("<h2>Google GenAI</h2>", "", gr.HTML),
-        "google_use_vertexai": OptionInfo(False, "Google cloud use VertexAI endpoints"),
-        "google_api_key": OptionInfo("", "Google cloud API key", gr.Textbox, secret=True, env_var='GOOGLE_API_KEY'),
-        "google_project_id": OptionInfo("", "Google Cloud project ID", gr.Textbox, secret=True, env_var='GOOGLE_PROJECT_ID'),
-        "google_location_id": OptionInfo("", "Google Cloud location ID", gr.Textbox),
         "model_sd3_sep": OptionInfo("<h2>Stable Diffusion 3.x</h2>", "", gr.HTML),
         "model_sd3_disable_te5": OptionInfo(False, "Disable T5 text encoder"),
         "model_h1_sep": OptionInfo("<h2>HiDream</h2>", "", gr.HTML),
@@ -114,6 +109,10 @@ def create_settings(cmd_opts):
         "model_ernie_sep": OptionInfo("<h2>ERNIE-Image</h2>", "", gr.HTML),
         "model_ernie_enable_pe": OptionInfo(False, "Enable prompt-enhance"),
     }))
+
+    # --- Cloud Providers ---
+    from modules.cloud.options import register_options as register_cloud_options
+    register_cloud_options(options_templates)
 
     # --- Model Offloading ---
     options_templates.update(options_section(('offload', "Model Offloading"), {

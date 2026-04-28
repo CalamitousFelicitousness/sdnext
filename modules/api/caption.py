@@ -587,6 +587,7 @@ def get_vqa_models():
     - `capabilities`: Model features (caption, vqa, detection, ocr, thinking)
     """
     from modules.caption import vqa
+    from modules.caption.models_def import resolve_provider
     models_list = []
     for name, repo in vqa.vlm_models.items():
         prompts = vqa.get_prompts_for_model(name)
@@ -598,11 +599,15 @@ def get_vqa_models():
             capabilities.append("detection")
         if vqa.is_thinking_model(name):
             capabilities.append("thinking")
+        provider_id = resolve_provider(name) or resolve_provider(repo)
+        if provider_id:
+            capabilities.append("cloud")
         models_list.append({
             "name": name,
             "repo": repo,
             "prompts": prompts,
-            "capabilities": list(set(capabilities))
+            "capabilities": list(set(capabilities)),
+            "provider": provider_id,
         })
     return models_list
 

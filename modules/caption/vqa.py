@@ -1483,13 +1483,28 @@ class VQA:
             elif 'fastvlm' in vqa_model.lower():
                 handler = 'fastvlm'
                 answer = self._fastvlm(question, image, vqa_model, model_name)
-            elif 'gemini' in vqa_model.lower():
-                handler = 'gemini'
-                gen_kwargs = get_kwargs()
-                from modules.caption import gemini
-                answer = gemini.predict(question, image, vqa_model, system_prompt, model_name, prefill, thinking_mode, gen_kwargs)
             else:
-                answer = 'unknown model'
+                from modules.caption.models_def import resolve_provider, strip_provider_prefix
+                provider_id = resolve_provider(model_name) or resolve_provider(vqa_model)
+                if provider_id:
+                    from modules.cloud import predict_vision, VisionRequest
+                    handler = f'cloud:{provider_id}'
+                    gen_kwargs = get_kwargs()
+                    clean_model = strip_provider_prefix(vqa_model, provider_id)
+                    req = VisionRequest(
+                        model=clean_model,
+                        prompt=question,
+                        system=system_prompt,
+                        prefill=prefill,
+                        thinking=bool(thinking_mode),
+                        image=image,
+                        temperature=gen_kwargs.get('temperature'),
+                        max_tokens=gen_kwargs.get('max_output_tokens'),
+                    )
+                    resp = predict_vision(provider_id, req)
+                    answer = resp.text if not resp.error else f'Error: {resp.error}'
+                else:
+                    answer = 'unknown model'
         except Exception as e:
             errors.display(e, 'VQA')
             answer = 'error'

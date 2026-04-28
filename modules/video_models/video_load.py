@@ -22,10 +22,10 @@ loaded_model = None
 
 def load_custom(model_name: str):
     log.debug(f'Video load: module=pipe repo="{model_name}" cls=Custom')
-    if 'veo-3.1' in model_name:
-        from modules.video_models.google_veo import load_veo
-        pipe = load_veo(model_name)
-        return pipe
+    from modules.cloud.registry import VIDEO_PROVIDERS  # pylint: disable=import-outside-toplevel
+    if 'veo-3.1' in model_name and 'google' in VIDEO_PROVIDERS:
+        from modules.cloud.google_video import build_pipeline  # pylint: disable=import-outside-toplevel
+        return build_pipeline(model_name)
     return None
 
 

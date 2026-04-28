@@ -179,3 +179,79 @@ def get_vlm_repo(display_name: str) -> str:
     """Look up repo ID from display name, stripping any trailing symbols."""
     name = display_name.strip()
     return vlm_models.get(name, name)
+
+
+# Cloud provider routing tables.
+# vlm_provider_map: explicit display-name -> provider-id overrides (highest priority).
+# vlm_provider_prefixes: ordered (prefix, provider-id) pairs; first match wins.
+# Native vendor prefixes win over aggregator prefixes; OpenRouter routes use the
+# explicit "openrouter/" prefix to disambiguate from native vendor namespaces
+# (e.g. "google/gemini-..." means native Google, "openrouter/google/gemini-..."
+# means OpenRouter routing to Google).
+
+vlm_provider_map: dict[str, str] = {
+    f"Google Gemini 3.1 Pro {ui_symbols.cloud}":         'google',
+    f"Google Gemini 3.1 Flash Lite {ui_symbols.cloud}":  'google',
+    f"Google Gemini 3.0 Flash {ui_symbols.cloud}":       'google',
+    f"Google Gemini 2.5 Pro {ui_symbols.cloud}":         'google',
+    f"Google Gemini 2.5 Flash {ui_symbols.cloud}":       'google',
+}
+
+vlm_provider_prefixes: tuple[tuple[str, str], ...] = (
+    # Native Google: gemini- only. google/gemma-*, google/paligemma*, google/pix2struct-*
+    # are local OSS weights and must not match the cloud route.
+    ('google/gemini-', 'google'),
+    ('gemini-',        'google'),
+    # Native Anthropic: Anthropic does not release Claude weights publicly.
+    ('anthropic/',     'anthropic'),
+    ('claude-',        'anthropic'),
+    # Native OpenAI: chat/reasoning model prefixes.
+    ('openai/gpt-',    'openai'),
+    ('openai/o1-',     'openai'),
+    ('openai/o3-',     'openai'),
+    ('openai/o4-',     'openai'),
+    ('gpt-',           'openai'),
+    ('o1-',            'openai'),
+    ('o3-',            'openai'),
+    ('o4-',            'openai'),
+    # Aggregator providers use an explicit namespace prefix.
+    ('openrouter/',    'openrouter'),
+    ('nanogpt/',       'nanogpt'),
+    ('aihubmix/',      'aihubmix'),
+    ('huggingface/',   'huggingface'),
+)
+
+
+def strip_provider_prefix(name: str, provider_id: str) -> str:
+    """Strip a leading "<provider_id>/" from a model name, if present."""
+    if not name or not provider_id:
+        return name or ''
+    prefix = f'{provider_id}/'
+    if name.lower().startswith(prefix):
+        return name[len(prefix):]
+    return name
+
+
+def resolve_provider(name: str | None) -> str | None:
+    """Return the cloud provider id for a model name, or None if local/unknown.
+
+    Lookup order: exact display-name map, then prefix table against the raw
+    name, then prefix table against the resolved repo id (handles cloud display
+    names whose repo strings carry the canonical model prefix).
+    """
+    if not name:
+        return None
+    candidate = name.strip()
+    if candidate in vlm_provider_map:
+        return vlm_provider_map[candidate]
+    lowered = candidate.lower()
+    for prefix, provider_id in vlm_provider_prefixes:
+        if lowered.startswith(prefix):
+            return provider_id
+    repo = vlm_models.get(candidate)
+    if repo:
+        repo_lower = repo.lower()
+        for prefix, provider_id in vlm_provider_prefixes:
+            if repo_lower.startswith(prefix):
+                return provider_id
+    return None
