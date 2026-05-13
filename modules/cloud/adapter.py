@@ -17,10 +17,11 @@ import struct
 
 import httpx
 from PIL import Image
+from pydantic import ValidationError  # pylint: disable=no-name-in-module
 
 from modules.logger import log
 
-from modules.cloud.errors import InputValidationError
+from modules.cloud.errors import InputValidationError, ProviderError
 from modules.cloud.presets import resolve_input_limits
 from modules.cloud.protocol import (
     AudioResult,
@@ -30,6 +31,11 @@ from modules.cloud.protocol import (
     ProgressCallback,
     TranscribeResult,
     VideoResult,
+)
+from modules.cloud.response_models import (
+    ChatResponse,
+    ImageResponse,
+    Usage,
 )
 from modules.cloud.transport import HttpTransport
 
@@ -115,14 +121,22 @@ class OpenAICompatAdapter:
 
         on_progress({"type": "cloud_progress", "phase": "processing"})
         data = self.transport.post("/v1/chat/completions", json=body)
+        parsed = self.parse_response(ChatResponse, data)
 
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
+        if not parsed.choices:
+            return ChatResult(content="", finish_reason="stop", usage=self.parse_usage(parsed.usage))
+        choice = parsed.choices[0]
+        content = choice.message.content
+        # Multimodal chat responses can return content as a list of parts; for the
+        # text-only chat path, concatenate any text parts so callers always get a
+        # string. extract_images_from_chat handles the image parts separately.
+        if isinstance(content, list):
+            content = "".join(part.text or "" for part in content if part.type == "text")
         return ChatResult(
-            content=message.get("content", ""),
-            tool_calls=message.get("tool_calls"),
-            finish_reason=choice.get("finish_reason", "stop"),
-            usage=self.parse_usage(data.get("usage")),
+            content=content or "",
+            tool_calls=[tc.model_dump(exclude_unset=True) for tc in choice.message.tool_calls] if choice.message.tool_calls else None,
+            finish_reason=choice.finish_reason,
+            usage=self.parse_usage(parsed.usage),
         )
 
     def validate_key(self) -> bool:
@@ -204,13 +218,14 @@ class OpenAICompatAdapter:
         debug(f"Cloud: image request body provider={self.provider_id} body={body}")
         on_progress({"phase": "processing"})
         data = self.transport.post("/v1/images/generations", json=body)
+        parsed = self.parse_response(ImageResponse, data)
         on_progress({"phase": "downloading"})
-        images = self.extract_images(data)
+        images = self.extract_images(parsed)
         return ImageResult(
             images=images,
-            revised_prompt=(data.get("data", [{}])[0].get("revised_prompt") if data.get("data") else None),
+            revised_prompt=(parsed.data[0].revised_prompt if parsed.data else None),
             format="png",
-            usage=self.parse_usage(data.get("usage")),
+            usage=self.parse_usage(parsed.usage),
         )
 
     def generate_image_edit(self, params: dict, on_progress: ProgressCallback) -> ImageResult:
@@ -233,14 +248,14 @@ class OpenAICompatAdapter:
         response = self.transport.client.post("/v1/images/edits", files=files, data=data_fields)
         if response.status_code >= 400:
             self.transport.raise_for_status(response)
-        result_data = response.json()
+        parsed = self.parse_response(ImageResponse, response.json())
         on_progress({"phase": "downloading"})
-        images = self.extract_images(result_data)
+        images = self.extract_images(parsed)
         return ImageResult(
             images=images,
-            revised_prompt=(result_data.get("data", [{}])[0].get("revised_prompt") if result_data.get("data") else None),
+            revised_prompt=(parsed.data[0].revised_prompt if parsed.data else None),
             format="png",
-            usage=self.parse_usage(result_data.get("usage")),
+            usage=self.parse_usage(parsed.usage),
         )
 
     def generate_image_via_dataurl(self, params: dict, on_progress: ProgressCallback) -> ImageResult:
@@ -257,13 +272,14 @@ class OpenAICompatAdapter:
             mask_b64 = base64.b64encode(params["mask"]).decode("ascii")
             body["maskDataUrl"] = f"data:image/png;base64,{mask_b64}"
         data = self.transport.post("/v1/images/generations", json=body)
+        parsed = self.parse_response(ImageResponse, data)
         on_progress({"phase": "downloading"})
-        images = self.extract_images(data)
+        images = self.extract_images(parsed)
         return ImageResult(
             images=images,
-            revised_prompt=(data.get("data", [{}])[0].get("revised_prompt") if data.get("data") else None),
+            revised_prompt=(parsed.data[0].revised_prompt if parsed.data else None),
             format="png",
-            usage=self.parse_usage(data.get("usage")),
+            usage=self.parse_usage(parsed.usage),
         )
 
     def generate_image_via_chat(self, params: dict, on_progress: ProgressCallback) -> ImageResult:
@@ -305,12 +321,13 @@ class OpenAICompatAdapter:
             body.update(params["extra_params"])
         on_progress({"phase": "processing"})
         data = self.transport.post("/v1/chat/completions", json=body)
+        parsed = self.parse_response(ChatResponse, data)
         on_progress({"phase": "downloading"})
-        images = self.extract_images_from_chat(data)
+        images = self.extract_images_from_chat(parsed)
         return ImageResult(
             images=images,
             format="png",
-            usage=self.parse_usage(data.get("usage")),
+            usage=self.parse_usage(parsed.usage),
         )
 
     # ---- video / audio stubs ----------------------------------------------------
@@ -352,38 +369,54 @@ class OpenAICompatAdapter:
             api_params.update(params["extra_params"])
         return api_params
 
-    def extract_images(self, data: dict) -> list[bytes]:
+    def extract_images(self, response: ImageResponse) -> list[bytes]:
         images: list[bytes] = []
-        for item in data.get("data", []):
-            if item.get("b64_json"):
-                images.append(base64.b64decode(item["b64_json"]))
-            elif item.get("url"):
-                img_bytes = self.download_url(item["url"])
+        for item in response.data:
+            if item.b64_json:
+                images.append(base64.b64decode(item.b64_json))
+            elif item.url:
+                img_bytes = self.download_url(item.url)
                 if img_bytes:
                     images.append(img_bytes)
         return images
 
-    def extract_images_from_chat(self, data: dict) -> list[bytes]:
+    def extract_images_from_chat(self, response: ChatResponse) -> list[bytes]:
         images: list[bytes] = []
-        for choice in data.get("choices", []):
-            message = choice.get("message", {})
-            content = message.get("content")
+        for choice in response.choices:
+            content = choice.message.content
             if not isinstance(content, list):
                 continue
             for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "image_url":
-                    url_data = part.get("image_url", {}).get("url", "")
-                    if url_data.startswith("data:") and "," in url_data:
-                        b64 = url_data.split(",", 1)[1]
+                if part.type == "image_url" and part.image_url:
+                    url = part.image_url.url
+                    if url.startswith("data:") and "," in url:
+                        b64 = url.split(",", 1)[1]
                         if b64:
                             images.append(base64.b64decode(b64))
-                elif part.get("type") == "image":
-                    b64 = part.get("data", "") or part.get("b64_json", "")
+                elif part.type == "image":
+                    b64 = part.data or part.b64_json
                     if b64:
                         images.append(base64.b64decode(b64))
         return images
+
+    def parse_response(self, model_cls, data):
+        """Validate a raw provider response dict against a Pydantic model.
+
+        On schema failure, raises ProviderError with the first validation
+        error message - surfaces shape drift early at the boundary rather
+        than producing KeyErrors / TypeErrors deep in extraction code.
+        """
+        try:
+            return model_cls.model_validate(data)
+        except ValidationError as e:
+            errors = e.errors()
+            first = errors[0] if errors else {}
+            loc = ".".join(str(x) for x in first.get("loc", ()))
+            msg = first.get("msg", str(e))
+            raise ProviderError(
+                f"Malformed {model_cls.__name__} from provider (at {loc!r}: {msg})",
+                provider=self.provider_id,
+            ) from e
 
     def download_url(self, url: str) -> bytes | None:
         """Fetch image bytes when a provider returns a URL instead of base64
@@ -647,12 +680,22 @@ class OpenAICompatAdapter:
                 resolutions.append(normalized)
         return resolutions or None
 
-    def parse_usage(self, usage_data: dict | None) -> CloudUsage | None:
-        if not usage_data:
+    def parse_usage(self, usage: Usage | dict | None) -> CloudUsage | None:
+        """Translate the upstream Usage shape into our internal CloudUsage type.
+
+        Accepts the Pydantic Usage model (from a parsed response) or a raw dict
+        (when called from model normalization paths that have not yet parsed).
+        """
+        if not usage:
             return None
+        if isinstance(usage, dict):
+            try:
+                usage = Usage.model_validate(usage)
+            except ValidationError:
+                return None
         return CloudUsage(
-            prompt_tokens=usage_data.get("prompt_tokens"),
-            completion_tokens=usage_data.get("completion_tokens"),
-            total_tokens=usage_data.get("total_tokens"),
-            cost=usage_data.get("cost"),
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cost=usage.cost,
         )
