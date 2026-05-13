@@ -289,3 +289,24 @@ def validate_provider(provider_id: str) -> tuple[bool, str | None]:
         return (False, str(e))
     except Exception as e:
         return (False, f"Unexpected error: {e}")
+
+
+# Modalities recognised by resolve_default_provider. Must stay in sync with
+# the cloud_default_<modality>_provider options registered in
+# modules/ui_definitions.py.
+MODALITIES = ("text", "vision", "image", "video", "audio")
+
+
+def resolve_default_provider(modality: str) -> str:
+    """Return the configured default provider id for a modality.
+
+    Tries cloud_default_<modality>_provider first, then falls back to the
+    coarse cloud_default_provider, then to "". Callers that pass an unknown
+    modality silently fall through to the coarse default (the modality
+    -specific lookup just misses).
+    """
+    if modality:
+        specific = getattr(shared.opts, f"cloud_default_{modality}_provider", "") or ""
+        if specific:
+            return specific
+    return getattr(shared.opts, "cloud_default_provider", "") or ""

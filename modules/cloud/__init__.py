@@ -33,6 +33,7 @@ from modules.cloud.protocol import (
     VideoResult,
 )
 from modules.cloud.registry import (
+    MODALITIES,
     ProviderConfig,
     add_provider,
     get_adapter,
@@ -40,6 +41,7 @@ from modules.cloud.registry import (
     list_providers,
     refresh_models,
     remove_provider,
+    resolve_default_provider,
     update_provider,
     validate_provider,
 )
@@ -65,6 +67,7 @@ __all__ = [
     "ProviderAdapter",
     "TranscribeResult",
     "VideoResult",
+    "MODALITIES",
     "ProviderConfig",
     "add_provider",
     "get_adapter",
@@ -72,6 +75,7 @@ __all__ = [
     "list_providers",
     "refresh_models",
     "remove_provider",
+    "resolve_default_provider",
     "update_provider",
     "validate_provider",
     "caption",
