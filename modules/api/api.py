@@ -119,6 +119,10 @@ class Api:
         from modules.api import caption
         caption.register_api(self)
 
+        # cloud api
+        from modules.cloud import api_v1 as cloud_api_v1
+        cloud_api_v1.register_api(self)
+
         # lora api
         from modules.api import loras
         loras.register_api(self)

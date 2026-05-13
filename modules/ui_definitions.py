@@ -619,6 +619,16 @@ def create_settings(cmd_opts):
         "civitai_discard_hash_mismatch": OptionInfo(True, 'CivitAI discard downloads with hash mismatch', gr.Checkbox, {"visible": False}),
     }))
 
+    # --- Cloud Providers ---
+    options_templates.update(options_section(('cloud', "Cloud Providers"), {
+        "cloud_sep": OptionInfo("<h2>Cloud Providers</h2>", "", gr.HTML),
+        "cloud_providers": OptionInfo("[]", "Cloud provider list (JSON; managed via /sdapi/v1/cloud/providers)", gr.TextArea, {"visible": False}),
+        "cloud_default_provider": OptionInfo("", "Default cloud provider id"),
+        "outdir_cloud_image": OptionInfo("", "Folder for cloud-generated images (empty = use local txt2img/img2img dir)", component_args=hide_dirs, folder=True),
+        "outdir_cloud_video": OptionInfo("", "Folder for cloud-generated videos (empty = use outdir_video)", component_args=hide_dirs, folder=True),
+        "outdir_audio": OptionInfo("outputs/audio", "Folder for audio output (TTS, STT)", component_args=hide_dirs, folder=True),
+    }))
+
     # --- Extra Networks ---
     from modules import shared
     options_templates.update(options_section(('extra_networks', "Networks"), {
