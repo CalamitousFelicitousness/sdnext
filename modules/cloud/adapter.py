@@ -227,9 +227,10 @@ class OpenAICompatAdapter:
         if params.get("mask"):
             mask_data = self.invert_mask_for_openai(params["mask"])
             files["mask"] = ("mask.png", mask_data, "image/png")
-        # Strip Content-Type so httpx sets the multipart boundary itself.
-        headers = {k: v for k, v in self.transport.client.headers.items() if k.lower() != "content-type"}
-        response = self.transport.client.post("/v1/images/edits", files=files, data=data_fields, headers=headers)
+        # files= triggers httpx multipart encoding with auto-generated boundary.
+        # transport.build_headers() deliberately omits Content-Type so the
+        # auto-detected multipart header wins (see transport.py:50-62).
+        response = self.transport.client.post("/v1/images/edits", files=files, data=data_fields)
         if response.status_code >= 400:
             self.transport.raise_for_status(response)
         result_data = response.json()

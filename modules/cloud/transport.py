@@ -60,7 +60,11 @@ class HttpTransport:
         return normalized
 
     def build_headers(self, key: str) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+        # Intentionally NOT setting Content-Type here. httpx auto-detects it per
+        # request body type (json= -> application/json, files= -> multipart/form-data
+        # with boundary). A client-level Content-Type default would override the
+        # auto-detected multipart and break /v1/images/edits.
+        headers: dict[str, str] = {}
         auth_type = self.preset.get("auth_header")
         if auth_type and key:
             headers["Authorization"] = f"{auth_type} {key}"
