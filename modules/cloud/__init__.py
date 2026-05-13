@@ -47,6 +47,7 @@ from modules.cloud.registry import (
 )
 from modules.cloud.text import caption, enhance_prompt, vqa
 from modules.cloud.image import CloudImageGenResult, generate_image
+from modules.cloud.video import CloudVideoGenResult, generate_video
 from modules.cloud.migrate import migrate_legacy_providers
 
 
@@ -83,6 +84,8 @@ __all__ = [
     "vqa",
     "generate_image",
     "CloudImageGenResult",
+    "generate_video",
+    "CloudVideoGenResult",
 ]
 
 

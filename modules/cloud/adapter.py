@@ -14,11 +14,13 @@ import base64
 import io
 import os
 import struct
+import time
 
 import httpx
 from PIL import Image
 from pydantic import ValidationError  # pylint: disable=no-name-in-module
 
+from modules import shared
 from modules.logger import log
 
 from modules.cloud.errors import InputValidationError, ProviderError
@@ -35,9 +37,23 @@ from modules.cloud.protocol import (
 from modules.cloud.response_models import (
     ChatResponse,
     ImageResponse,
+    NanogptVideoStatus,
+    NanogptVideoSubmit,
     Usage,
+    VideoStatusResponse,
+    VideoSubmitResponse,
 )
 from modules.cloud.transport import HttpTransport
+
+
+# Video polling constants. Tuned for typical Sora / Kling / Pruna response cadence.
+# `VIDEO_POLL_INITIAL_DELAY` avoids a guaranteed-to-be-empty first poll right after
+# submission (most providers have a queue stage of at least a few seconds).
+# Total wall-clock cap comes from `preset["timeouts"]["cloud_video"]`.
+VIDEO_POLL_INTERVAL = 5.0
+VIDEO_POLL_INITIAL_DELAY = 2.0
+VIDEO_SUCCESS_STATUSES = frozenset({"completed", "succeeded"})
+VIDEO_TERMINAL_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "canceled", "error"})
 
 
 # SD_CLOUD_DEBUG=1 enables verbose per-request logging. Mirrors gallery.py:18 pattern.
@@ -175,10 +191,20 @@ class OpenAICompatAdapter:
         return results
 
     def cancel(self, remote_id: str) -> bool:
+        """Best-effort cancel of a remote job.
+
+        Bypasses the transport's request() wrapper because that wrapper
+        aborts on shared.state.interrupted - and cancel() is precisely
+        the cleanup we want to run AFTER an interrupt. Goes directly to
+        the underlying httpx client so the POST always reaches the wire.
+        """
         try:
-            self.transport.post(f"/v1/videos/{remote_id}/cancel", json={})
-            log.info(f"Cloud: cancelled provider={self.provider_id} remote_id={remote_id}")
-            return True
+            response = self.transport.client.post(f"/v1/videos/{remote_id}/cancel", json={})
+            if response.status_code < 400:
+                log.info(f"Cloud: cancelled provider={self.provider_id} remote_id={remote_id}")
+                return True
+            log.warning(f"Cloud: cancel returned status={response.status_code} provider={self.provider_id} remote_id={remote_id}")
+            return False
         except Exception as e:
             log.warning(f"Cloud: cancel failed provider={self.provider_id} remote_id={remote_id}: {e}")
             return False
@@ -333,7 +359,277 @@ class OpenAICompatAdapter:
     # ---- video / audio stubs ----------------------------------------------------
 
     def generate_video(self, params: dict, on_progress: ProgressCallback = noop_progress) -> VideoResult:
-        raise NotImplementedError("Cloud video generation not yet implemented in this adapter")
+        """Dispatch video generation to the right backend based on preset.video_via.
+
+        Dispatch table:
+
+            video_via    backend
+            "videos"     /v1/videos (OpenAI Sora pattern)
+            "nanogpt"    /api/generate-video + /api/video/status (NanoGPT)
+            "probe"      /v1/videos as best-effort default
+        """
+        on_progress({"phase": "submitted"})
+        has_image = bool(params.get("image"))
+        video_via = self.preset.get("video_via", "videos")
+        log.info(f"Cloud: generate_video provider={self.provider_id} model={params.get('model')} duration={params.get('duration')} aspect={params.get('aspect_ratio')} size={params.get('size')} has_image={has_image} via={video_via}")
+        if video_via == "nanogpt":
+            return self.generate_video_via_nanogpt(params, on_progress)
+        return self.generate_video_via_endpoint(params, on_progress)
+
+    def generate_video_via_endpoint(self, params: dict, on_progress: ProgressCallback) -> VideoResult:
+        """OpenAI Sora pattern: POST /v1/videos, GET /v1/videos/{id}.
+
+        Submit returns `id`, status response uses lowercase enum, video URL
+        is at urls[0] / unsigned_urls[0] / video_url, falls back to
+        GET /v1/videos/{id}/content.
+        """
+        has_image = bool(params.get("image"))
+        body = self.build_video_params(params)
+        body["model"] = params["model"]
+        body["prompt"] = params.get("prompt", "")
+        if has_image:
+            image_data = params["image"]
+            if not isinstance(image_data, bytes):
+                raise ProviderError("Video init image must be bytes (decode base64 at the api_v1 boundary)", provider=self.provider_id)
+            body["input_reference"] = base64.b64encode(image_data).decode("ascii")
+
+        debug(f"Cloud: video submit body provider={self.provider_id} body_keys={list(body.keys())}")
+        on_progress({"phase": "processing", "progress": 0.0})
+        submit_data = self.transport.post("/v1/videos", json=body)
+        submit = self.parse_response(VideoSubmitResponse, submit_data)
+        on_progress({"phase": "queued_remote", "remote_id": submit.id, "progress": 0.0})
+        return self.poll_video_job(submit.id, on_progress)
+
+    def generate_video_via_nanogpt(self, params: dict, on_progress: ProgressCallback) -> VideoResult:
+        """NanoGPT pattern: POST /api/generate-video, GET /api/video/status?requestId=...
+
+        Per docs.nano-gpt.com/api-reference/video-generation. Body uses
+        duration as a string (some NanoGPT models reject numeric duration);
+        we coerce to str for compatibility.
+        """
+        has_image = bool(params.get("image"))
+        body = self.build_video_params(params)
+        body["model"] = params["model"]
+        body["prompt"] = params.get("prompt", "")
+        # NanoGPT documents `duration` as a string; coerce if numeric came through.
+        if "duration" in body and not isinstance(body["duration"], str):
+            body["duration"] = str(int(body["duration"]) if float(body["duration"]).is_integer() else body["duration"])
+        if has_image:
+            image_data = params["image"]
+            if not isinstance(image_data, bytes):
+                raise ProviderError("Video init image must be bytes (decode base64 at the api_v1 boundary)", provider=self.provider_id)
+            # NanoGPT's i2v body shape isn't documented; using input_reference
+            # as the closest convention. May need adjustment after a live i2v test.
+            body["input_reference"] = base64.b64encode(image_data).decode("ascii")
+
+        debug(f"Cloud: nanogpt video submit body provider={self.provider_id} body_keys={list(body.keys())}")
+        on_progress({"phase": "processing", "progress": 0.0})
+        # NanoGPT base_url already ends in /api; submit path is /generate-video.
+        submit_data = self.transport.post("/generate-video", json=body)
+        submit = self.parse_response(NanogptVideoSubmit, submit_data)
+        on_progress({"phase": "queued_remote", "remote_id": submit.id, "progress": 0.0})
+        return self.poll_video_via_nanogpt(submit.id, on_progress)
+
+    def poll_video_via_nanogpt(self, video_id: str, on_progress: ProgressCallback) -> VideoResult:
+        """Poll NanoGPT's /api/video/status endpoint until terminal status."""
+        timeout = float(self.preset.get("timeouts", {}).get("cloud_video", 600))
+        if not self.transport.sleep_interruptible(VIDEO_POLL_INITIAL_DELAY):
+            raise ProviderError("Interrupted by user before first video poll", provider=self.provider_id)
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if shared.state.interrupted:
+                # NanoGPT does not document a cancel endpoint - just abort polling
+                raise ProviderError("Interrupted by user during video poll", provider=self.provider_id)
+            # NanoGPT base_url already ends in /api; status path is /video/status.
+            status_data = self.transport.get(f"/video/status?requestId={video_id}")
+            parsed = self.parse_response(NanogptVideoStatus, status_data)
+            # NanoGPT nests everything under `data`; pull status from there.
+            inner = parsed.data
+            raw_status = (inner.status if inner else "") or ""
+            status_lower = raw_status.lower()
+            raw_progress = inner.progress if inner else None
+            progress = self.normalize_progress(raw_progress)
+            debug(f"Cloud: nanogpt video poll provider={self.provider_id} remote_id={video_id} status={status_lower} progress={progress} elapsed={time.time() - t0:.1f}s")
+            on_progress({"phase": "processing", "progress": progress, "remote_status": status_lower})
+
+            if status_lower in {"completed", "succeeded"}:
+                on_progress({"phase": "downloading", "progress": 0.95, "remote_status": status_lower})
+                video_url = self.extract_nanogpt_video_url(parsed)
+                if not video_url:
+                    raise ProviderError(f"NanoGPT video {video_id} reported {status_lower} but no URL in response", provider=self.provider_id)
+                video_bytes = self.download_url(video_url)
+                if not video_bytes:
+                    raise ProviderError(f"Failed to download NanoGPT video {video_id} from {video_url[:120]}", provider=self.provider_id)
+                log.info(f"Cloud: video completed provider={self.provider_id} remote_id={video_id} bytes={len(video_bytes)} elapsed={time.time() - t0:.1f}s")
+                return VideoResult(
+                    data=video_bytes,
+                    format="mp4",
+                    duration=(inner.duration if inner else None),
+                    usage=self.parse_usage(parsed.usage),
+                )
+            if status_lower in {"failed", "error", "cancelled", "canceled"}:
+                err_field = (inner.error if inner else None)
+                err = err_field if isinstance(err_field, (str, dict)) else f"status={raw_status}"
+                if isinstance(err, dict):
+                    err = err.get("message") or err.get("code") or str(err)
+                log.warning(f"Cloud: nanogpt video terminal-non-success provider={self.provider_id} remote_id={video_id} status={status_lower} err={err!r}")
+                raise ProviderError(f"Video {status_lower}: {err}", provider=self.provider_id)
+            if not self.transport.sleep_interruptible(VIDEO_POLL_INTERVAL):
+                raise ProviderError("Interrupted by user during video poll backoff", provider=self.provider_id)
+
+        log.error(f"Cloud: nanogpt video timeout provider={self.provider_id} remote_id={video_id} elapsed={time.time() - t0:.1f}s")
+        raise ProviderError(f"Video generation timed out after {timeout}s", provider=self.provider_id)
+
+    @staticmethod
+    def extract_nanogpt_video_url(status: NanogptVideoStatus) -> str | None:
+        """Pull the video URL out of NanoGPT's nested response structure.
+
+        Tries data.output.video.url first (Pruna shape), then falls back to
+        data.output.videoUrls[0] (some other Pruna routes return both forms).
+        """
+        if status.data and status.data.output:
+            video = status.data.output.video
+            if isinstance(video, dict):
+                url = video.get("url")
+                if isinstance(url, str) and url:
+                    return url
+            urls = status.data.output.videoUrls
+            if isinstance(urls, list) and urls and isinstance(urls[0], str):
+                return urls[0]
+        return None
+
+    def poll_video_job(self, video_id: str, on_progress: ProgressCallback) -> VideoResult:
+        """Poll /v1/videos/{id} until terminal status, then download the bytes."""
+        timeout = float(self.preset.get("timeouts", {}).get("cloud_video", 600))
+        # Initial delay; honour interrupt even during this short sleep.
+        if not self.transport.sleep_interruptible(VIDEO_POLL_INITIAL_DELAY):
+            self.cancel(video_id)
+            raise ProviderError("Interrupted by user before first video poll", provider=self.provider_id)
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if shared.state.interrupted:
+                self.cancel(video_id)
+                raise ProviderError("Interrupted by user during video poll", provider=self.provider_id)
+            status_data = self.transport.get(f"/v1/videos/{video_id}")
+            parsed = self.parse_response(VideoStatusResponse, status_data)
+            status = (parsed.status or "").lower()
+            progress = self.normalize_progress(parsed.progress)
+            debug(f"Cloud: video poll provider={self.provider_id} remote_id={video_id} status={status} progress={progress} elapsed={time.time() - t0:.1f}s")
+            on_progress({"phase": "processing", "progress": progress, "remote_status": status})
+
+            if status in VIDEO_SUCCESS_STATUSES:
+                on_progress({"phase": "downloading", "progress": 0.95, "remote_status": status})
+                video_bytes = self.download_video_content(video_id, parsed)
+                if not video_bytes:
+                    raise ProviderError(f"Video {video_id} reported {status} but no bytes returned", provider=self.provider_id)
+                log.info(f"Cloud: video completed provider={self.provider_id} remote_id={video_id} bytes={len(video_bytes)} elapsed={time.time() - t0:.1f}s")
+                return VideoResult(
+                    data=video_bytes,
+                    format="mp4",
+                    duration=parsed.seconds if parsed.seconds is not None else parsed.duration,
+                    usage=self.parse_usage(parsed.usage),
+                )
+
+            if status in VIDEO_TERMINAL_STATUSES:
+                err = self.extract_video_error(parsed)
+                log.warning(f"Cloud: video terminal-non-success provider={self.provider_id} remote_id={video_id} status={status} err={err!r}")
+                raise ProviderError(f"Video {status}: {err}", provider=self.provider_id)
+
+            if not self.transport.sleep_interruptible(VIDEO_POLL_INTERVAL):
+                self.cancel(video_id)
+                raise ProviderError("Interrupted by user during video poll backoff", provider=self.provider_id)
+
+        # Timed out
+        log.error(f"Cloud: video timeout provider={self.provider_id} remote_id={video_id} elapsed={time.time() - t0:.1f}s")
+        self.cancel(video_id)
+        raise ProviderError(f"Video generation timed out after {timeout}s", provider=self.provider_id)
+
+    def download_video_content(self, video_id: str, status: VideoStatusResponse) -> bytes | None:
+        """Resolve the video bytes from the provider response.
+
+        Precedence:
+            1. status.urls[0] (signed URL list, OpenAI Sora)
+            2. status.unsigned_urls[0] (legacy, some Kling routes)
+            3. status.video_url (singular field, observed in some custom providers)
+            4. Fallback: GET /v1/videos/{id}/content (Sora's content streaming endpoint)
+        """
+        candidates: list[str] = []
+        candidates.extend(status.urls or [])
+        candidates.extend(status.unsigned_urls or [])
+        if status.video_url:
+            candidates.append(status.video_url)
+        for url in candidates:
+            if url:
+                data = self.download_url(url)
+                if data:
+                    return data
+        # Fallback to provider's content endpoint.
+        try:
+            response = self.transport.client.get(f"/v1/videos/{video_id}/content")
+            if response.status_code == 200:
+                debug(f"Cloud: video content fallback ok provider={self.provider_id} remote_id={video_id} bytes={len(response.content)}")
+                return response.content
+            log.warning(f"Cloud: video content fallback status={response.status_code} provider={self.provider_id} remote_id={video_id}")
+        except Exception as e:
+            log.warning(f"Cloud: video content fallback failed provider={self.provider_id} remote_id={video_id}: {e}")
+        return None
+
+    def build_video_params(self, params: dict) -> dict:
+        """Apply the preset's video param map to caller params.
+
+        Mirrors build_image_params: skip a fixed set of caller-only keys, look
+        up each remaining key in the preset's video param_map, apply the
+        optional transform, drop None results, merge extra_params last.
+        """
+        video_map = self.preset.get("param_maps", {}).get("video", {})
+        api_params: dict = {}
+        skip_keys = {"provider", "model", "prompt", "type", "priority", "extra_params", "image"}
+        for caller_name, value in params.items():
+            if caller_name in skip_keys:
+                continue
+            mapping = video_map.get(caller_name)
+            if mapping is None:
+                continue
+            api_name, transform = mapping if isinstance(mapping, tuple) else (mapping, None)
+            if api_name is None or api_name.startswith("_"):
+                continue
+            result_val = transform(value) if transform else value
+            if result_val is not None:
+                api_params[api_name] = result_val
+        if params.get("extra_params"):
+            api_params.update(params["extra_params"])
+        return api_params
+
+    @staticmethod
+    def normalize_progress(raw: float | int | None) -> float | None:
+        """Normalize a provider's progress field to a 0-1 float.
+
+        Providers report progress as 0-1 (Sora) or 0-100 (Kling). Heuristic:
+        if raw > 1.5, treat as 0-100; else treat as 0-1. Clamps to [0, 1].
+        None passes through.
+        """
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value > 1.5:
+            value = value / 100.0
+        return max(0.0, min(1.0, value))
+
+    @staticmethod
+    def extract_video_error(status: VideoStatusResponse) -> str:
+        """Pull a human-readable message out of the provider's error envelope.
+
+        Providers vary: some return `error: "string"`, others `error: {message: ..., code: ...}`.
+        """
+        err = status.error
+        if isinstance(err, dict):
+            return err.get("message") or err.get("code") or str(err)
+        if isinstance(err, str):
+            return err
+        return f"status={status.status}"
 
     def tts(self, params: dict) -> AudioResult:
         raise NotImplementedError("Cloud audio TTS not yet implemented in this adapter")
@@ -578,6 +874,8 @@ class OpenAICompatAdapter:
             modalities.append("audio-in")
         if "video" in output_mods:
             modalities.append("text-to-video")
+        if "video" in output_mods and "image" in input_mods:
+            modalities.append("image-to-video")
         if not modalities:
             modalities.append("chat")
         return modalities

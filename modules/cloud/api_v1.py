@@ -16,7 +16,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field  # pylint: disable=no-name-in-module
 
-from modules.cloud import image, registry, text
+from modules.cloud import image, registry, text, video
 from modules.cloud.errors import (
     AuthError,
     CloudError,
@@ -153,6 +153,33 @@ class ResCloudImage(BaseModel):
     provider: str
     model: str
     info: str = Field(description="JSON-encoded generation metadata. PNG `parameters` text chunk also embeds an sdnext-style infotext.")
+    parameters: dict = Field(description="Request echoed back.")
+    usage: dict | None = Field(default=None, title="Usage", description="Token / cost reporting if the provider returned usage.")
+
+
+class ReqCloudVideo(BaseModel):
+    prompt: str = Field(title="Prompt")
+    provider: str = Field(title="Provider id")
+    model: str = Field(title="Model id", description="Video-capable model on the chosen provider (e.g. pruna-ai/p-video/text-to-video, sora-2, kling-v26-pro).")
+    aspect_ratio: str | None = Field(default=None, title="Aspect ratio", description="Provider-specific (e.g. '16:9', '9:16', '1:1'). Sora uses orientation instead.")
+    duration: float | None = Field(default=None, title="Duration (seconds)", description="Provider-specific clamps apply (typically 1-60).")
+    size: str | None = Field(default=None, title="Size", description="Pixel dimensions like '1280x720'. Some providers prefer aspect_ratio over size.")
+    init_image: str | None = Field(default=None, title="Init image", description="Base64-encoded PNG / JPEG / WEBP. Presence triggers image-to-video (i2v).")
+    seed: int = Field(default=-1, title="Seed", description="-1 picks a random seed at the orchestrator layer; the same seed is passed to the provider.")
+    extra_params: dict = Field(default_factory=dict, title="Extra params", description="Provider-specific passthrough merged into the request body last. Use this for Sora's `seconds`/`orientation`/`resolution` fields.")
+    save_video: bool = Field(default=True, title="Save to disk", description="Defaults to True (cloud videos cost money).")
+    send_video: bool = Field(default=True, title="Return base64 in response")
+
+
+class ResCloudVideo(BaseModel):
+    video: str | None = Field(default=None, title="Generated video", description="Base64-encoded video bytes when send_video=True; null otherwise.")
+    saved_path: str | None = Field(default=None, title="Saved path", description="Disk path when save_video=True; null otherwise.")
+    thumbnail: str | None = Field(default=None, title="Thumbnail", description="Base64-encoded PNG of the first frame; null on extraction failure.")
+    duration: float | None = Field(default=None, title="Duration (seconds)", description="Provider-reported duration if available.")
+    format: str = Field(default="mp4", title="Format", description="Video container format (mp4, webm, etc.).")
+    provider: str
+    model: str
+    info: str = Field(description="JSON-encoded generation metadata.")
     parameters: dict = Field(description="Request echoed back.")
     usage: dict | None = Field(default=None, title="Usage", description="Token / cost reporting if the provider returned usage.")
 
@@ -400,6 +427,50 @@ def post_cloud_img2img(req: ReqCloudImg2Img):
     return call_cloud_image(req, init_bytes=init_bytes, mask_bytes=mask_bytes)
 
 
+def post_cloud_video(req: ReqCloudVideo):
+    """Single endpoint for both t2v and i2v; init_image presence dispatches."""
+    if not req.prompt or not req.prompt.strip():
+        return bad_request_response("prompt is required")
+    init_bytes: bytes | None = None
+    if req.init_image:
+        try:
+            init_bytes = base64.b64decode(req.init_image, validate=True)
+        except Exception as e:
+            return bad_request_response(f"Invalid base64 init_image: {e}")
+        if not init_bytes:
+            return bad_request_response("init_image is empty")
+    result = video.generate_video(
+        prompt=req.prompt,
+        provider_id=req.provider,
+        model=req.model,
+        aspect_ratio=req.aspect_ratio,
+        duration=req.duration,
+        size=req.size,
+        init_image=init_bytes,
+        seed=req.seed,
+        extra_params=req.extra_params or None,
+        save_to_disk=req.save_video,
+    )
+    video_b64: str | None = None
+    if req.send_video and result.video:
+        video_b64 = base64.b64encode(result.video).decode("ascii")
+    thumbnail_b64: str | None = None
+    if result.thumbnail:
+        thumbnail_b64 = base64.b64encode(result.thumbnail).decode("ascii")
+    return ResCloudVideo(
+        video=video_b64,
+        saved_path=result.saved_path,
+        thumbnail=thumbnail_b64,
+        duration=result.duration,
+        format=result.format,
+        provider=result.provider,
+        model=result.model,
+        info=json.dumps(result.info),
+        parameters=req.model_dump(),
+        usage=result.info.get("usage"),
+    )
+
+
 # ---- registration ----------------------------------------------------------------
 
 
@@ -425,3 +496,5 @@ def register_api(api):
 
     api.add_api_route("/sdapi/v1/cloud/txt2img", post_cloud_txt2img, methods=["POST"], response_model=ResCloudImage, tags=["Cloud"])
     api.add_api_route("/sdapi/v1/cloud/img2img", post_cloud_img2img, methods=["POST"], response_model=ResCloudImage, tags=["Cloud"])
+
+    api.add_api_route("/sdapi/v1/cloud/video", post_cloud_video, methods=["POST"], response_model=ResCloudVideo, tags=["Cloud"])

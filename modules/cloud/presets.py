@@ -40,6 +40,21 @@ DEFAULT_TTS_PARAMS = {
     "response_format": ("response_format", None),
 }
 
+# Video param map. Most cloud video providers (Kling, Pruna, Wavespeed,
+# AIHubMix passthrough) accept duration / aspect_ratio / size with the names
+# below. Sora 2 differs (`seconds` / `orientation` / `resolution`); callers
+# targeting Sora-specific models pass equivalents via `extra_params` until a
+# per-model preset family lands. Negative seed dropped (None means random).
+DEFAULT_VIDEO_PARAMS = {
+    "prompt": ("prompt", None),
+    "negative_prompt": ("negative_prompt", None),
+    "duration": ("duration", lambda v: max(0.1, min(60.0, float(v)))),
+    "aspect_ratio": ("aspect_ratio", None),
+    "size": ("size", None),
+    "seed": ("seed", lambda v: v if v >= 0 else None),
+    "n": ("n", lambda v: max(1, min(4, v))),
+}
+
 
 def size_transform_wxh(w: int, h: int) -> dict:
     """Convert width/height to the WxH string format most providers expect."""
@@ -50,6 +65,7 @@ PRESETS: dict[str, dict] = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api",
         "image_via": "chat",
+        "video_via": "videos",
         "model_list": ["/v1/models"],
         "model_list_params": {"output_modalities": "all"},
         "auth_header": "Bearer",
@@ -63,6 +79,7 @@ PRESETS: dict[str, dict] = {
             "image_size_transform": size_transform_wxh,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 20_000_000,
@@ -81,6 +98,7 @@ PRESETS: dict[str, dict] = {
     "openai": {
         "base_url": "https://api.openai.com",
         "image_via": "images",
+        "video_via": "videos",
         "model_list": ["/v1/models"],
         "model_list_params": {},
         "auth_header": "Bearer",
@@ -90,6 +108,7 @@ PRESETS: dict[str, dict] = {
             "image_size_transform": size_transform_wxh,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 50_000_000,
@@ -115,6 +134,7 @@ PRESETS: dict[str, dict] = {
     "nanogpt": {
         "base_url": "https://nano-gpt.com/api",
         "image_via": "dataurl",
+        "video_via": "nanogpt",
         "model_list": ["/v1/models", "/v1/image-models", "/v1/video-models", "/v1/audio-models"],
         "model_list_params": {},
         "auth_header": "Bearer",
@@ -124,6 +144,7 @@ PRESETS: dict[str, dict] = {
             "image_size_transform": size_transform_wxh,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 4_000_000,
@@ -142,6 +163,7 @@ PRESETS: dict[str, dict] = {
     "aihubmix": {
         "base_url": "https://aihubmix.com",
         "image_via": "images",
+        "video_via": "videos",
         "model_list": ["/v1/models"],
         "model_list_params": {},
         "auth_header": "Bearer",
@@ -151,6 +173,7 @@ PRESETS: dict[str, dict] = {
             "image_size_transform": size_transform_wxh,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 50_000_000,
@@ -169,6 +192,7 @@ PRESETS: dict[str, dict] = {
     "ollama": {
         "base_url": "http://localhost:11434",
         "image_via": "images",
+        "video_via": "videos",
         "model_list": ["/v1/models"],
         "model_list_params": {},
         "auth_header": None,
@@ -188,6 +212,7 @@ PRESETS: dict[str, dict] = {
                 "stop": ("stop", None),
             },
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 25_000_000,
@@ -206,6 +231,7 @@ PRESETS: dict[str, dict] = {
     "custom": {
         "base_url": "",
         "image_via": "probe",
+        "video_via": "probe",
         "model_list": ["/v1/models"],
         "model_list_params": {},
         "auth_header": "Bearer",
@@ -215,6 +241,7 @@ PRESETS: dict[str, dict] = {
             "image_size_transform": size_transform_wxh,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
+            "video": DEFAULT_VIDEO_PARAMS,
         },
         "input_limits": {
             "max_image_bytes": 20_000_000,

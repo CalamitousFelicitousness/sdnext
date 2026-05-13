@@ -67,6 +67,7 @@ class VideoResult:
     format: str = "mp4"
     duration: float | None = None
     thumbnail: bytes | None = None
+    usage: CloudUsage | None = None
 
 
 # Progress callback shape: dict with at minimum a "phase" key.
