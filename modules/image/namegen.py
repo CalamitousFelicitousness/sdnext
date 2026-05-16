@@ -41,11 +41,13 @@ class FilenameGenerator:
         'epoch': lambda self: int(time.time()),
         'job_timestamp': lambda self: getattr(self.p, "job_timestamp", shared.state.job_timestamp),
 
-        'model': lambda self: shared.sd_model.sd_checkpoint_info.title if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else '',
-        'model_shortname': lambda self: shared.sd_model.sd_checkpoint_info.model_name if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else '',
-        'model_name': lambda self: shared.sd_model.sd_checkpoint_info.model_name if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else '',
-        'model_type': lambda self: shared.sd_model_type if shared.sd_loaded else '',
-        'model_hash': lambda self: shared.sd_model.sd_checkpoint_info.shorthash if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else '',
+        'model': lambda self: (self.p and getattr(self.p, 'cloud_model', None)) or (shared.sd_model.sd_checkpoint_info.title if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else ''),
+        'model_shortname': lambda self: (self.p and getattr(self.p, 'cloud_model', None)) or (shared.sd_model.sd_checkpoint_info.model_name if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else ''),
+        'model_name': lambda self: (self.p and getattr(self.p, 'cloud_model', None)) or (shared.sd_model.sd_checkpoint_info.model_name if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else ''),
+        'model_type': lambda self: (self.p and getattr(self.p, 'cloud_provider', None)) or (shared.sd_model_type if shared.sd_loaded else ''),
+        'model_hash': lambda self: '' if (self.p and getattr(self.p, 'cloud_model', None)) else (shared.sd_model.sd_checkpoint_info.shorthash if shared.sd_loaded and getattr(shared.sd_model, 'sd_checkpoint_info', None) is not None else ''),
+        'cloud_provider': lambda self: (self.p and getattr(self.p, 'cloud_provider', None)) or NOTHING,
+        'cloud_model': lambda self: (self.p and getattr(self.p, 'cloud_model', None)) or NOTHING,
 
         'lora': lambda self: self.p and getattr(self.p, 'extra_generation_params', {}).get('LoRA networks', ''),
 

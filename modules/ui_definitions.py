@@ -468,7 +468,7 @@ def create_settings(cmd_opts):
         "use_original_name_batch": OptionInfo(True, "Batch uses original name"),
         "save_to_dirs": OptionInfo(False, "Save images to a subdirectory"),
         "directories_filename_pattern": OptionInfo("[date]", "Directory name pattern", component_args=hide_dirs),
-        "samples_filename_pattern": OptionInfo("[seq]-[date]-[model_name]", "Images filename pattern", component_args=hide_dirs),
+        "samples_filename_pattern": OptionInfo("[seq]-[date]-[model_name]-[cloud_provider]", "Images filename pattern", component_args=hide_dirs),
         "directories_max_prompt_words": OptionInfo(8, "Max words", gr.Slider, {"minimum": 1, "maximum": 99, "step": 1, **hide_dirs}),
 
         "outdir_sep_dirs": OptionInfo("<h2>Folders</h2>", "", gr.HTML),
