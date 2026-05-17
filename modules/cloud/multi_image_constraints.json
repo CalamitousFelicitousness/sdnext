@@ -1,6 +1,27 @@
 {
   "schema_version": 1,
   "generated": "2026-05-18T00:00:00Z",
-  "_notes": "Entries here advertise per-model multi-image *input* capability for cloud providers. Schema per entry: {multi_image: bool, max_input_images: int | null}. multi_image=true means the model accepts >1 reference image per request; max_input_images is the cap (null = uncapped or unknown). Live extraction from provider metadata is not currently usable for this signal (NanoGPT's supported_parameters.max_images turns out to be the output-n cap, not the input cap — see adapter.extract_multi_image_info docstring), so this file is the authoritative source. Populate per model via the Phase 2.6 step 5B probe sweep.",
-  "entries": {}
+  "_notes": "Entries here advertise per-model multi-image *input* capability for cloud providers. Schema per entry: {multi_image: bool, max_input_images: int | null}. multi_image=true means the model accepts >1 reference image per request; max_input_images is the cap (null = uncapped or unknown to client; server may still reject excess). The key prefix matches the user's chosen provider_id (typically the preset name 'nanogpt' for the NanoGPT preset). Live extraction from provider metadata is not currently usable for this signal: NanoGPT's supported_parameters.max_images is the output-n cap, not the input cap (see adapter.extract_multi_image_info docstring). The live probe sweep on 2026-05-18 verified N=2 multi-image dispatch for the NanoGPT models below; the cap field is left null because the upper bound was not probed (the probe budgeted for shape verification only). Source cassettes at test/cloud/cassettes/probe/multi_image/nanogpt/.",
+  "entries": {
+    "nanogpt/nano-banana-edit": {
+      "multi_image": true,
+      "max_input_images": null,
+      "_source": "probe-2026-05-18 (verified N=2)"
+    },
+    "nanogpt/seedream-v4.5": {
+      "multi_image": true,
+      "max_input_images": null,
+      "_source": "probe-2026-05-18 (verified N=2)"
+    },
+    "nanogpt/flux-kontext": {
+      "multi_image": true,
+      "max_input_images": null,
+      "_source": "probe-2026-05-18 (verified N=2)"
+    },
+    "nanogpt/qwen-image-2.0": {
+      "multi_image": true,
+      "max_input_images": null,
+      "_source": "probe-2026-05-18 (verified N=2)"
+    }
+  }
 }
