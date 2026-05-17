@@ -83,6 +83,10 @@ def load_size_constraints() -> dict[str, SizeConstraint]:
     a single bad entry must not prevent the rest of the catalog from loading.
     Unknown schema_version is treated as 'cannot interpret' and yields an empty
     map (callers fall through to size_constraint=None for every model).
+
+    Underscore-prefixed keys (e.g. `_source`, `_inferred_from`) carry probe
+    provenance metadata and are stripped before validation; they are
+    informational only and not part of the SizeConstraint schema.
     """
     raw = readfile(str(SIZE_CONSTRAINTS_PATH), as_type="dict", silent=True)
     if not raw:
@@ -93,7 +97,8 @@ def load_size_constraints() -> dict[str, SizeConstraint]:
     out: dict[str, SizeConstraint] = {}
     for key, payload in raw.get("entries", {}).items():
         try:
-            out[key] = _SIZE_CONSTRAINT_ADAPTER.validate_python(payload)
+            constraint_payload = {k: v for k, v in payload.items() if not k.startswith("_")}
+            out[key] = _SIZE_CONSTRAINT_ADAPTER.validate_python(constraint_payload)
         except ValidationError as e:
             log.warning(f"Cloud: size_constraints.json entry {key} failed validation: {e}")
     return out

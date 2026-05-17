@@ -1,9 +1,17 @@
 """Cloud image size constraint probe: main CLI entry point.
 
-Usage:
-    python -m modules.cloud.probe.probe_image_sizes --provider nanogpt [--dry-run | --discovery-only]
-    python -m modules.cloud.probe.probe_image_sizes --provider openrouter --models flux-1.1-pro,flux-2-pro
-    python -m modules.cloud.probe.probe_image_sizes --provider aihubmix --resume
+Invocation: direct script execution, NOT `python -m`.
+
+    python modules/cloud/probe/probe_image_sizes.py --provider nanogpt [--dry-run | --discovery-only]
+    python modules/cloud/probe/probe_image_sizes.py --provider openrouter --models flux-1.1-pro,flux-2-pro
+    python modules/cloud/probe/probe_image_sizes.py --provider aihubmix --resume
+
+`python -m modules.cloud.probe.probe_image_sizes` does NOT work because Python's
+-m flag imports parent packages before the leaf module's code runs, which means
+modules/cloud/__init__.py triggers modules/shared.py init (and its strict
+argparse pass via cmd_args.settings_args) BEFORE this file's sys.argv reset
+gets a chance to fire. Direct invocation runs the file top-to-bottom and the
+reset takes effect before any modules.* imports.
 
 Workflow:
     1. Discovery pass (free, no generation): writes test/cloud/discovery/<provider>/*.json
@@ -19,14 +27,23 @@ torn load even with atomic-replace semantics (live sdnext caches via
 @functools.cache, so the race window is only on cold startup, but still).
 """
 
-# The sdnext modules.* import chain calls cmd_args.parse_args() at shared.py
-# import time, which rejects argparse args that aren't sdnext's own. Reset
-# sys.argv to just the program name BEFORE importing anything from modules.*,
-# then re-parse the original argv with our own parser below.
 import sys
+from pathlib import Path
 
+# Capture the real CLI args and clear sys.argv BEFORE any modules.* import.
+# The sdnext modules.* import chain calls cmd_args.settings_args() at shared.py
+# import time (line 168), which calls parser.parse_args() in strict mode and
+# would reject our argparse flags. Empty sys.argv means strict parser sees
+# nothing and falls through to defaults; ORIGINAL_ARGV is re-parsed by our
+# own parser at main() time below.
 ORIGINAL_ARGV = list(sys.argv)
 sys.argv = [sys.argv[0]]
+
+# Direct script invocation puts the script's own dir on sys.path, not the
+# repo root. Add the repo root so `from modules import ...` works.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import argparse
 import json
@@ -174,44 +191,50 @@ def probe_provider(
                 log.info(f"Cloud probe: codified from metadata {provider_id}/{mid} kind={constraint.kind}")
 
         uncodified_members = [mid for mid in members if mid not in codified_from_metadata]
-        if not uncodified_members:
-            save_in_progress(payload)
-            continue
 
-        if discovery_only:
-            log.info(f"Cloud probe: discovery-only mode; skipping generation probes for family={family_key} ({len(uncodified_members)} uncodified)")
-            continue
-
-        rep_normalized = cheapest_family_member([discovery[mid]["normalized"] for mid in uncodified_members])
-        if rep_normalized is None:
-            continue
-        rep_id = rep_normalized["id"]
-        log.info(f"Cloud probe: family={family_key} representative={rep_id} (cheapest of {len(uncodified_members)} uncodified)")
-
-        try:
-            probed_constraint = probe_single_model(adapter, rep_id)  # pylint: disable=assignment-from-none
-        except NotImplementedError as e:
-            log.warning(f"Cloud probe: {e}")
-            continue
-        except Exception as e:
-            log.error(f"Cloud probe: probe failed family={family_key} representative={rep_id}: {e}")
-            time.sleep(GENERATION_PROBE_BACKOFF_SECONDS)
-            continue
-
-        if probed_constraint is None:
-            log.warning(f"Cloud probe: probe inconclusive family={family_key} representative={rep_id}; no entry written")
-            continue
-
-        entries[f"{provider_id}/{rep_id}"] = serialize_constraint_entry(probed_constraint, source="probed")
-        for sibling_id in uncodified_members:
-            if sibling_id == rep_id:
-                continue
-            entries[f"{provider_id}/{sibling_id}"] = serialize_constraint_entry(probed_constraint, source="inferred_from_family", inferred_from=rep_id)
-        log.info(f"Cloud probe: replicated constraint kind={probed_constraint.kind} to {len(uncodified_members) - 1} siblings of {rep_id}")
+        if uncodified_members and discovery_only:
+            log.info(f"Cloud probe: discovery-only; skipping generation for family={family_key} ({len(uncodified_members)} uncodified)")
+        elif uncodified_members:
+            run_family_probe(adapter, provider_id, family_key, uncodified_members, discovery, entries)
 
         save_in_progress(payload)
 
     return entries
+
+
+def run_family_probe(adapter, provider_id: str, family_key: str, uncodified_members: list[str], discovery: dict, entries: dict) -> None:
+    """Probe one cheapest family representative; replicate result to siblings.
+
+    Mutates `entries` in place. Failures are logged and the function returns
+    without adding entries for that family; the caller will still call
+    save_in_progress() so prior families' results are preserved.
+    """
+    rep_normalized = cheapest_family_member([discovery[mid]["normalized"] for mid in uncodified_members])
+    if rep_normalized is None:
+        return
+    rep_id = rep_normalized["id"]
+    log.info(f"Cloud probe: family={family_key} representative={rep_id} (cheapest of {len(uncodified_members)} uncodified)")
+
+    try:
+        probed_constraint = probe_single_model(adapter, rep_id)  # pylint: disable=assignment-from-none
+    except NotImplementedError as e:
+        log.warning(f"Cloud probe: {e}")
+        return
+    except Exception as e:
+        log.error(f"Cloud probe: probe failed family={family_key} representative={rep_id}: {e}")
+        time.sleep(GENERATION_PROBE_BACKOFF_SECONDS)
+        return
+
+    if probed_constraint is None:
+        log.warning(f"Cloud probe: probe inconclusive family={family_key} representative={rep_id}; no entry written")
+        return
+
+    entries[f"{provider_id}/{rep_id}"] = serialize_constraint_entry(probed_constraint, source="probed")
+    for sibling_id in uncodified_members:
+        if sibling_id == rep_id:
+            continue
+        entries[f"{provider_id}/{sibling_id}"] = serialize_constraint_entry(probed_constraint, source="inferred_from_family", inferred_from=rep_id)
+    log.info(f"Cloud probe: replicated constraint kind={probed_constraint.kind} to {len(uncodified_members) - 1} siblings of {rep_id}")
 
 
 def probe_single_model(adapter, model_id: str) -> SizeConstraint | None:
@@ -230,7 +253,7 @@ def probe_single_model(adapter, model_id: str) -> SizeConstraint | None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="probe_image_sizes", description=__doc__.split("\n\n", maxsplit=1)[0])
-    parser.add_argument("--provider", required=True, help="Provider id (e.g. nanogpt, openrouter, aihubmix)")
+    parser.add_argument("--provider", default=None, help="Provider id (e.g. nanogpt, openrouter, aihubmix). Required unless --finalize is set.")
     parser.add_argument("--models", default=None, help="Comma-separated model ID allowlist (default: all image-capable)")
     parser.add_argument("--discovery-only", action="store_true", help="Discovery pass only; no generation probes (free)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without any API calls")
@@ -247,6 +270,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.finalize:
         finalize_in_progress()
         return 0
+
+    if not args.provider:
+        log.error("Cloud probe: --provider is required unless --finalize is set")
+        return 2
 
     only_models = [m.strip() for m in args.models.split(",")] if args.models else None
     try:

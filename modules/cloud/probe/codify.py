@@ -18,6 +18,7 @@ runs a generation probe):
 """
 
 import re
+from typing import Literal
 
 from modules.cloud.protocol import (
     SizeConstraint,
@@ -68,26 +69,43 @@ def bucket_label_to_dims(label: str) -> dict[str, int] | None:
 def codify_from_resolutions(resolutions: list[str], default: str | None = None) -> SizeConstraint | None:
     """Choose an Enum or Bucket variant from a list of resolution-like strings.
 
-    All strings must be uniformly WxH literals OR uniformly bucket labels.
-    Mixed lists are treated as ambiguous and return None.
+    The string 'auto' (case-insensitive) is extracted as an `allow_auto=True`
+    signal regardless of where it sits in the list; providers commonly list
+    it alongside concrete WxH options (e.g. NanoGPT's Qwen Image 2.0 Pro:
+    ['1024x1024', '1280x720', ..., 'auto']). After removing 'auto', the
+    remaining entries must be uniformly WxH literals OR uniformly bucket
+    labels; mixed remainders return None.
+
+    An auto-only list (just ['auto']) yields an Enum with empty options and
+    allow_auto=True.
     """
     if not resolutions:
         return None
     cleaned = [r.strip() for r in resolutions if r and r.strip()]
     if not cleaned:
         return None
-    all_wxh = all(looks_like_wxh(r) for r in cleaned)
-    all_bucket = all(looks_like_bucket_label(r) for r in cleaned)
+    allow_auto = any(r.lower() == "auto" for r in cleaned)
+    non_auto = [r for r in cleaned if r.lower() != "auto"]
+    auto_wire: Literal["literal", "omit", "default"] | None = "literal" if allow_auto else None
+
+    if not non_auto:
+        # auto-only list: empty enum with allow_auto=True
+        if default and default.lower() == "auto":
+            default = None  # 'auto' is signalled by allow_auto, not stored as a literal option
+        return SizeConstraintEnum(options=[], allow_auto=True, auto_wire=auto_wire, default=default)
+
+    all_wxh = all(looks_like_wxh(r) for r in non_auto)
+    all_bucket = all(looks_like_bucket_label(r) for r in non_auto)
     if all_wxh:
-        normalized = [normalize_wxh(r) or r for r in cleaned]
+        normalized = [normalize_wxh(r) or r for r in non_auto]
         chosen_default = default if default in normalized else None
-        return SizeConstraintEnum(options=normalized, default=chosen_default)
+        return SizeConstraintEnum(options=normalized, allow_auto=allow_auto, auto_wire=auto_wire, default=chosen_default)
     if all_bucket:
-        normalized = [r.lower() for r in cleaned]
+        normalized = [r.lower() for r in non_auto]
         resolve = {label: dims for label in normalized if (dims := bucket_label_to_dims(label)) is not None}
         chosen_default = default if default in normalized else None
-        return SizeConstraintBucket(options=normalized, resolve=resolve, default=chosen_default)
-    return None  # mixed shapes - probe required
+        return SizeConstraintBucket(options=normalized, resolve=resolve, allow_auto=allow_auto, auto_wire=auto_wire, default=chosen_default)
+    return None  # mixed remainder - probe required
 
 
 def codify_from_pricing_keys(pricing_keys: list[str]) -> SizeConstraint | None:

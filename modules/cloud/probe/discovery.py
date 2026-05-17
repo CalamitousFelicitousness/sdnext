@@ -87,6 +87,61 @@ def fetch_model_detail(adapter, model_id: str) -> dict | None:
         return None
 
 
+def list_aihubmix_image_models(adapter) -> list[dict]:
+    """AIHubMix has no architecture metadata on /v1/models, but exposes a
+    separate /api/v1/models?type=image_generation endpoint with richer per-
+    model metadata (per https://docs.aihubmix.com/en/api/Models-API). Fetch
+    those and normalize to the shape adapter.normalize_models would produce
+    so the downstream pipeline is uniform.
+
+    Field translation:
+      model_id          -> id
+      input_modalities  -> modalities (str like 'text,image' becomes list)
+      types             -> modalities (image_generation forces text-to-image)
+      pricing.input     -> pricing.prompt_token
+      pricing.output    -> pricing.completion_token
+    """
+    try:
+        data = adapter.transport.get_cached("/api/v1/models", ttl=300, params={"type": "image_generation"})
+    except Exception as e:
+        log.warning(f"Cloud probe: AIHubMix image-models endpoint failed: {e}")
+        return []
+    raw = data.get("data", []) if isinstance(data, dict) else []
+    normalized: list[dict] = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        model_id = m.get("model_id") or m.get("id")
+        if not model_id:
+            continue
+        input_mods_raw = m.get("input_modalities", "")
+        input_mods = [s.strip() for s in input_mods_raw.split(",") if s.strip()] if isinstance(input_mods_raw, str) else (input_mods_raw or [])
+        modalities = ["text-to-image"]
+        if "image" in input_mods:
+            modalities.append("image-to-image")
+        pricing_raw = m.get("pricing") or {}
+        pricing: dict = {"currency": "USD"}
+        if pricing_raw.get("input") is not None:
+            pricing["prompt_token"] = pricing_raw["input"]
+        if pricing_raw.get("output") is not None:
+            pricing["completion_token"] = pricing_raw["output"]
+        normalized.append({
+            "source": "cloud",
+            "id": model_id,
+            "name": m.get("model_name") or model_id,
+            "provider": adapter.provider_id,
+            "modalities": modalities,
+            "capabilities": m.get("features") or [],
+            "pricing": pricing if len(pricing) > 1 else None,
+            "context_length": m.get("context_length"),
+            "supported_params": None,
+            "description": m.get("desc") or m.get("description"),
+            "default_params": None,
+            "_aihubmix_raw": m,
+        })
+    return normalized
+
+
 def harvest_provider_metadata(adapter, *, filter_image_modality: bool = True) -> dict[str, dict]:
     """Discover metadata for every model on the given adapter.
 
@@ -97,8 +152,15 @@ def harvest_provider_metadata(adapter, *, filter_image_modality: bool = True) ->
     level and the model still gets an entry (hints derived from the bulk list
     alone).
     """
-    bulk_raw = adapter.list_models()
-    normalized_models = adapter.normalize_models(bulk_raw)
+    # adapter.list_models() already returns normalized output; do NOT re-normalize.
+    # Double-normalize would strip the source `architecture` field that infer_modalities
+    # depends on, resulting in every model being classified as 'chat' regardless of true modality.
+    # AIHubMix needs a special path because its /v1/models has no architecture metadata;
+    # the dedicated /api/v1/models?type=image_generation endpoint carries proper image data.
+    if adapter.provider_id == "aihubmix":
+        normalized_models = list_aihubmix_image_models(adapter)
+    else:
+        normalized_models = adapter.list_models()
     out: dict[str, dict] = {}
     for normalized in normalized_models:
         model_id = normalized.get("id")
