@@ -147,6 +147,60 @@ def record_size_validation_telemetry(provider_id: str, event: str) -> None:
         log.debug(f"Cloud: telemetry persist failed: {e}")
 
 
+def resolve_default_to_dims(constraint: SizeConstraint) -> tuple[int, int]:
+    """Parse a SizeConstraint's `default` value to a (width, height) pair.
+
+    Enum and Free defaults are WxH strings ('1024x1024'). Bucket defaults are
+    symbolic labels ('2k') resolved through the constraint's `resolve` map.
+    Returns (0, 0) on any parse failure so callers can degrade gracefully.
+    """
+    default = constraint.default
+    if not default:
+        return 0, 0
+    if isinstance(constraint, SizeConstraintBucket):
+        dims = constraint.resolve.get(default) or {}
+        return int(dims.get("w", 0)), int(dims.get("h", 0))
+    try:
+        w_str, h_str = default.lower().split("x", 1)
+        return int(w_str), int(h_str)
+    except (ValueError, AttributeError):
+        return 0, 0
+
+
+def resolve_auto_dispatch(provider_id: str, model: str) -> tuple[str | None, int, int, str]:
+    """Resolve how `size="auto"` should be wired into adapter params.
+
+    Looks up the model's size_constraint and consults its `auto_wire` field to
+    decide what shape the outgoing request body should take. Returns
+    `(size_token, dispatch_width, dispatch_height, mode)`:
+
+    - `size_token` -> value for adapter_params["size"], or None to omit the key
+    - `dispatch_width`/`dispatch_height` -> values for adapter_params width/height
+      (0 short-circuits the preset's `image_size_transform` so a literal "auto"
+      survives into the outgoing JSON body)
+    - `mode` -> one of `"literal"`, `"omit"`, `"default-resolved"`, `"unknown"`,
+      used by the caller to decide whether preflight should still validate WxH
+
+    When the model has no constraint, or has `allow_auto=False`, we still pass
+    `"auto"` through as a literal: the adapter has no better signal and the
+    provider's own error envelope becomes the source of truth. The pre-flight
+    helper (with `ask_auto=True`) will warn or hard-block based on `allow_auto`.
+    """
+    from modules.cloud.adapter import get_size_constraint  # lazy: avoid import cycle
+    constraint = get_size_constraint(provider_id, model)
+    if constraint is None or not constraint.allow_auto:
+        return "auto", 0, 0, "unknown"
+    wire = constraint.auto_wire or "literal"
+    if wire == "omit":
+        return None, 0, 0, "omit"
+    if wire == "default":
+        w, h = resolve_default_to_dims(constraint)
+        if w and h:
+            return None, w, h, "default-resolved"
+        return "auto", 0, 0, "literal"  # default missing: degrade to literal
+    return "auto", 0, 0, "literal"
+
+
 def run_size_preflight(provider_id: str, model: str, width: int, height: int, ask_auto: bool = False) -> None:
     """Run pre-flight size validation per the cloud_image_size_validation setting.
 
@@ -278,6 +332,7 @@ def generate_image(
     negative_prompt: str = "",
     width: int = 1024,
     height: int = 1024,
+    ask_auto: bool = False,
     n: int = 1,
     seed: int = -1,
     steps: int = 28,
@@ -308,23 +363,41 @@ def generate_image(
         seed = random.randint(0, 2**32 - 1)
     outdir = resolve_outdir(is_img2img)
 
+    # Auto-size dispatch: caller asks for provider-chosen dims;
+    # consult the model's size_constraint to wire it correctly. For
+    # "default-resolved" the constraint pinned a real WxH so the rest of the
+    # function treats it as a normal explicit request.
+    dispatch_width, dispatch_height = width, height
+    dispatch_size_token: str | None = None
+    dispatch_mode = "explicit"
+    if ask_auto:
+        dispatch_size_token, dispatch_width, dispatch_height, dispatch_mode = resolve_auto_dispatch(provider_id, model)
+        if dispatch_mode == "default-resolved":
+            width, height = dispatch_width, dispatch_height
+
     jobid = shared.state.begin(STATE_TITLE, api=True)
     shared.state.textinfo = f"Cloud: {provider_id} / {model}"
-    log.info(f"Cloud: generate_image provider={provider_id} model={model} {width}x{height} n={n} mode={'img2img' if is_img2img else 'txt2img'} save={save_to_disk}")
+    log.info(
+        f"Cloud: generate_image provider={provider_id} model={model} "
+        f"{width}x{height}{' auto=' + dispatch_mode if ask_auto else ''} "
+        f"n={n} mode={'img2img' if is_img2img else 'txt2img'} save={save_to_disk}"
+    )
 
     try:
         adapter_params: dict = {
             "model": model,
             "prompt": prompt,
             "negative_prompt": negative_prompt,
-            "width": width,
-            "height": height,
+            "width": dispatch_width,
+            "height": dispatch_height,
             "n": n,
             "seed": seed,
             "steps": steps,
             "guidance": guidance_scale,
             "quality": quality,
         }
+        if dispatch_size_token is not None:
+            adapter_params["size"] = dispatch_size_token
         if style:
             adapter_params["style"] = style
         if is_img2img:
@@ -341,7 +414,10 @@ def generate_image(
             if on_progress is not None:
                 on_progress(event)
 
-        run_size_preflight(provider_id, model, width, height)
+        # In "default-resolved" mode we know the dims explicitly so validate
+        # them as normal WxH; in literal/omit modes we want allow_auto checked.
+        preflight_ask_auto = dispatch_mode in ("literal", "omit", "unknown")
+        run_size_preflight(provider_id, model, width, height, ask_auto=preflight_ask_auto)
         adapter = registry.get_adapter(provider_id)
         result = adapter.generate_image(adapter_params, progress_cb)
 
@@ -352,6 +428,12 @@ def generate_image(
             )
 
         saved_paths: list[str] = []
+        # In literal/omit auto modes the request width/height are sentinels (0)
+        # and the provider chose actual dims. Track the first decoded image's
+        # size so the returned result + infotext reflect reality, not sentinels.
+        report_unresolved_auto = ask_auto and dispatch_mode in ("literal", "omit", "unknown")
+        final_width, final_height = width, height
+        first_decoded_size: tuple[int, int] | None = None
         if save_to_disk:
             shared.state.textinfo = f"Cloud: {provider_id} / {model} - saving"
             for idx, img_bytes in enumerate(result.images):
@@ -361,14 +443,17 @@ def generate_image(
                 except Exception as e:
                     log.warning(f"Cloud: failed to decode image {idx+1}/{len(result.images)}: {e}")
                     continue
+                if first_decoded_size is None:
+                    first_decoded_size = pil.size
+                display_w, display_h = (pil.size if report_unresolved_auto else (width, height))
                 p = make_synthetic_p(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
                     provider_id=provider_id,
                     model=model,
                     seed=seed + idx,
-                    width=width,
-                    height=height,
+                    width=display_w,
+                    height=display_h,
                     steps=steps,
                     cfg_scale=guidance_scale,
                     denoising_strength=strength if is_img2img else 0,
@@ -380,8 +465,8 @@ def generate_image(
                     provider_id=provider_id,
                     model=model,
                     seed=seed + idx,
-                    width=width,
-                    height=height,
+                    width=display_w,
+                    height=display_h,
                     steps=steps,
                     guidance_scale=guidance_scale,
                     revised_prompt=result.revised_prompt,
@@ -398,6 +483,16 @@ def generate_image(
                 if fn:
                     saved_paths.append(fn)
                     log.debug(f"Cloud: saved image {idx+1}/{len(result.images)} to {fn}")
+        if report_unresolved_auto and first_decoded_size is not None:
+            final_width, final_height = first_decoded_size
+        elif report_unresolved_auto:
+            # No decode happened (e.g. save_to_disk=False). Peek the first image
+            # just for dim reporting so the caller doesn't see 0x0.
+            try:
+                with Image.open(io.BytesIO(result.images[0])) as probe_pil:
+                    final_width, final_height = probe_pil.size
+            except Exception as e:
+                log.debug(f"Cloud: ask_auto dim-probe failed: {e}")
 
         info = {
             "provider": provider_id,
@@ -405,8 +500,8 @@ def generate_image(
             "prompt": prompt,
             "negative_prompt": negative_prompt,
             "seed": seed,
-            "width": width,
-            "height": height,
+            "width": final_width,
+            "height": final_height,
             "n": n,
             "steps": steps,
             "guidance_scale": guidance_scale,
@@ -414,6 +509,8 @@ def generate_image(
             "style": style,
             "is_img2img": is_img2img,
             "revised_prompt": result.revised_prompt,
+            "ask_auto": ask_auto,
+            "auto_dispatch": dispatch_mode if ask_auto else None,
         }
         if result.usage is not None:
             info["usage"] = {
@@ -430,8 +527,8 @@ def generate_image(
             provider=provider_id,
             model=model,
             seed=seed,
-            width=width,
-            height=height,
+            width=final_width,
+            height=final_height,
             usage=result.usage,
             info=info,
         )
