@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "generated": "2026-05-17T00:00:00Z",
+  "_notes": "Entries here override the live extraction in adapter.normalize_models. Add a provider/model entry only when the provider does not advertise max_images via supported_parameters AND you have authoritative knowledge of the constraint. NanoGPT advertises max_images natively in /v1/image-models supported_parameters; entries here would only be needed to override that live data or to record multi-image capability for providers whose metadata is silent.",
+  "entries": {}
+}

@@ -109,17 +109,18 @@ def check_size_against_constraint(width: int, height: int, ask_auto: bool, const
     return True, ""  # unknown variant; defensive pass-through (typed union should make this unreachable)
 
 
-def record_size_validation_telemetry(provider_id: str, event: str) -> None:
-    """Increment a per-provider counter on the cloud_size_validation_telemetry hidden opt.
+def record_validation_telemetry(opt_name: str, provider_id: str, event: str) -> None:
+    """Increment a per-provider counter on the given hidden telemetry opt.
 
+    Shared machinery between size pre-flight and image-count pre-flight.
     Resets the per-provider window if older than TELEMETRY_WINDOW_DAYS. The
-    opts.save() cadence (debounced) handles persistence; no separate JSON file
-    or fasteners locking. Silent on any failure since telemetry is best-effort.
+    opts.save() cadence (debounced) handles persistence; no separate JSON
+    file or locking. Silent on any failure since telemetry is best-effort.
     """
     if not hasattr(shared, "opts"):
         return
     try:
-        raw = getattr(shared.opts, "cloud_size_validation_telemetry", "{}")
+        raw = getattr(shared.opts, opt_name, "{}")
         data = json.loads(raw) if isinstance(raw, str) and raw else {}
     except (json.JSONDecodeError, TypeError):
         data = {}
@@ -142,9 +143,19 @@ def record_size_validation_telemetry(provider_id: str, event: str) -> None:
     bucket[event] = bucket.get(event, 0) + 1
     bucket["total"] = bucket.get("total", 0) + 1
     try:
-        shared.opts.cloud_size_validation_telemetry = json.dumps(data)
+        setattr(shared.opts, opt_name, json.dumps(data))
     except Exception as e:
-        log.debug(f"Cloud: telemetry persist failed: {e}")
+        log.debug(f"Cloud: telemetry persist to {opt_name} failed: {e}")
+
+
+def record_size_validation_telemetry(provider_id: str, event: str) -> None:
+    """Persist a size-validation event to the size-validation opt."""
+    record_validation_telemetry("cloud_size_validation_telemetry", provider_id, event)
+
+
+def record_image_count_validation_telemetry(provider_id: str, event: str) -> None:
+    """Persist an image-count validation event to the image-count opt."""
+    record_validation_telemetry("cloud_image_count_validation_telemetry", provider_id, event)
 
 
 def resolve_default_to_dims(constraint: SizeConstraint) -> tuple[int, int]:
@@ -234,6 +245,47 @@ def run_size_preflight(provider_id: str, model: str, width: int, height: int, as
     log.warning(
         f"Cloud: size_constraint mismatch provider={provider_id} model={model} requested={width}x{height} reason={reason} "
         f"(set cloud_image_size_validation=hard to enforce client-side; cloud_image_size_validation=off to suppress this warning)"
+    )
+
+
+def run_image_count_preflight(provider_id: str, model: str, image_count: int) -> None:
+    """Pre-flight validation of the reference-image count.
+
+    Parallel to `run_size_preflight`; separate opt + telemetry per
+    B3 refinement so operators can dial size and count independently. Mode
+    comes from `cloud_image_count_validation` (hard / soft / off, default soft).
+    Constraint absence (no JSON entry for the provider+model) is treated as
+    'no opinion' and short-circuits, matching the size pre-flight semantic.
+
+    `image_count` is the resolved input-reference count (len of init_images);
+    callers pass 0 for txt2img.
+    """
+    if image_count <= 0:
+        return
+    mode = getattr(shared.opts, "cloud_image_count_validation", "soft") if hasattr(shared, "opts") else "soft"
+    if mode == "off":
+        return
+    from modules.cloud.adapter import get_multi_image_constraint  # lazy: avoid cycle
+    constraint = get_multi_image_constraint(provider_id, model)
+    if constraint is None:
+        return  # JSON has no opinion; live-extracted constraint isn't consulted here by design
+    max_images = constraint.get("max_images")
+    if max_images is None or image_count <= max_images:
+        record_image_count_validation_telemetry(provider_id, "predicted_valid")
+        return
+    if mode == "hard":
+        record_image_count_validation_telemetry(provider_id, "predicted_invalid_hard_block")
+        raise InputValidationError(
+            f"Cloud: {image_count} reference images supplied but {model} accepts at most {max_images}. "
+            f"Set cloud_image_count_validation=off to suppress this check.",
+            provider=provider_id,
+            field="image_count",
+            limit={"max": max_images},
+        )
+    record_image_count_validation_telemetry(provider_id, "predicted_invalid_server_will_judge")
+    log.warning(
+        f"Cloud: image_count mismatch provider={provider_id} model={model} requested={image_count} max={max_images} "
+        f"(set cloud_image_count_validation=hard to enforce client-side; cloud_image_count_validation=off to suppress this warning)"
     )
 
 
@@ -340,6 +392,7 @@ def generate_image(
     quality: str = "standard",
     style: str | None = None,
     init_image: bytes | None = None,
+    init_images: list[bytes] | None = None,
     mask: bytes | None = None,
     strength: float = 0.75,
     extra_params: dict | None = None,
@@ -352,13 +405,27 @@ def generate_image(
     layer decodes from base64 before invoking. Returns a CloudImageGenResult
     with both `images` (raw bytes) and `saved_paths` (disk paths if saved).
 
+    Reference-image precedence:
+        init_images is not None  -> use as-is (empty list is explicit "no refs")
+        init_image  is not None  -> treat as [init_image]
+        both None                -> no input image
+    `init_image` is kept indefinitely as a sugar alias for the single-image
+    case; callers can use either spelling. `mask` pairs with the primary
+    image (the first entry of the resolved list) per §11.11.10 / B6.
+
     Raises modules.cloud.errors.* on provider failures or empty responses.
     """
     if not prompt or not prompt.strip():
         raise ValueError("generate_image: prompt is empty")
-    is_img2img = init_image is not None
-    if mask is not None and init_image is None:
-        raise ValueError("generate_image: mask supplied without init_image")
+    if init_images is not None:
+        resolved_init_images = list(init_images)
+    elif init_image is not None:
+        resolved_init_images = [init_image]
+    else:
+        resolved_init_images = []
+    is_img2img = bool(resolved_init_images)
+    if mask is not None and not is_img2img:
+        raise ValueError("generate_image: mask supplied without init_image / init_images")
     if seed < 0:
         seed = random.randint(0, 2**32 - 1)
     outdir = resolve_outdir(is_img2img)
@@ -401,7 +468,16 @@ def generate_image(
         if style:
             adapter_params["style"] = style
         if is_img2img:
-            adapter_params["image"] = init_image
+            # adapter_params["image"] carries the primary (first) reference for
+            # back-compat with the four _via_* dispatch paths that still consume
+            # the singular field. Step 4 of §11.11.8 adds images_transform for
+            # provider-specific multi-image wire shapes; until then any model
+            # with multi_image=True still only sees images[0] (with a warning
+            # emitted by the adapter when the transform is missing and >1 ref
+            # is supplied).
+            adapter_params["image"] = resolved_init_images[0]
+            if len(resolved_init_images) > 1:
+                adapter_params["images"] = resolved_init_images
             adapter_params["strength"] = strength
             if mask is not None:
                 adapter_params["mask"] = mask
@@ -418,6 +494,7 @@ def generate_image(
         # them as normal WxH; in literal/omit modes we want allow_auto checked.
         preflight_ask_auto = dispatch_mode in ("literal", "omit", "unknown")
         run_size_preflight(provider_id, model, width, height, ask_auto=preflight_ask_auto)
+        run_image_count_preflight(provider_id, model, len(resolved_init_images))
         adapter = registry.get_adapter(provider_id)
         result = adapter.generate_image(adapter_params, progress_cb)
 

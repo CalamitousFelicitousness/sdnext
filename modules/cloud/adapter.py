@@ -113,6 +113,71 @@ def get_size_constraint(provider_id: str, model_id: str) -> SizeConstraint | Non
     return load_size_constraints().get(f"{provider_id}/{model_id}")
 
 
+# ---- multi_image_constraints.json loader ------------------------------------
+
+MULTI_IMAGE_CONSTRAINTS_PATH = Path(__file__).parent / "multi_image_constraints.json"
+MULTI_IMAGE_CONSTRAINTS_SCHEMA_VERSION = 1
+
+
+@functools.cache
+def load_multi_image_constraints() -> dict[str, dict]:
+    """Parse multi_image_constraints.json once per process, keyed by 'provider/model'.
+
+    Each entry is a plain dict with two recognised keys:
+      multi_image: bool       (default False)
+      max_images:  int | None (default None; None means uncapped or unknown)
+
+    Underscore-prefixed keys carry provenance metadata (e.g. probe source) and
+    are stripped at load time. Unknown schema_version yields an empty map so
+    callers fall through to live extraction (or to default False / None).
+    """
+    raw = readfile(str(MULTI_IMAGE_CONSTRAINTS_PATH), as_type="dict", silent=True)
+    if not raw:
+        return {}
+    if raw.get("schema_version") != MULTI_IMAGE_CONSTRAINTS_SCHEMA_VERSION:
+        log.warning(f"Cloud: multi_image_constraints.json schema_version={raw.get('schema_version')} not supported (expected {MULTI_IMAGE_CONSTRAINTS_SCHEMA_VERSION}); ignoring")
+        return {}
+    out: dict[str, dict] = {}
+    for key, payload in raw.get("entries", {}).items():
+        if not isinstance(payload, dict):
+            log.warning(f"Cloud: multi_image_constraints.json entry {key} is not a dict; skipping")
+            continue
+        clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+        out[key] = {
+            "multi_image": bool(clean.get("multi_image", False)),
+            "max_images": clean.get("max_images"),
+        }
+    return out
+
+
+def get_multi_image_constraint(provider_id: str, model_id: str) -> dict | None:
+    """JSON-side override lookup for the (provider, model) pair.
+
+    Returns the {multi_image, max_images} dict when an entry exists, else None
+    so the caller can fall through to live extraction.
+    """
+    return load_multi_image_constraints().get(f"{provider_id}/{model_id}")
+
+
+def extract_multi_image_info(raw_model: dict, supported_params: list[dict] | None) -> dict | None:
+    """Live extraction of multi_image / max_images from provider metadata.
+
+    Currently reads NanoGPT's `supported_parameters.max_images` directly off the
+    raw model body. OpenRouter and OpenAI presets do not advertise; they return
+    None (caller falls through to JSON override or default-False).
+
+    `supported_params` is the already-normalised descriptor list (kept for
+    future per-provider hooks); the dict-shape live data lives on `raw_model`.
+    """
+    _ = supported_params  # reserved for future per-provider hook
+    supported = raw_model.get("supported_parameters")
+    if isinstance(supported, dict):
+        max_images = supported.get("max_images")
+        if isinstance(max_images, int) and max_images > 0:
+            return {"multi_image": max_images > 1, "max_images": max_images}
+    return None
+
+
 class OpenAICompatAdapter:
     """Satisfies ProviderAdapter via structural typing (sync)."""
 
@@ -254,6 +319,39 @@ class OpenAICompatAdapter:
 
     # ---- public image surface ---------------------------------------------------
 
+    def apply_images_transform(self, params: dict) -> dict | None:
+        """Resolve a preset's images_transform hook for multi-image dispatch.
+
+        Contract: when the caller supplies more than one reference image, the
+        preset's `param_maps.images_transform` (if present) takes responsibility
+        for producing the wire shape. Return shape is a dict with optional keys
+        consumed by the four `_via_*` paths:
+
+            {"json":    dict, ... }   # merged into the outgoing JSON body
+            {"files":   list, ... }   # passed to httpx multipart `files=`
+            {"content": list, ... }   # appended to the chat content parts
+
+        Transforms receive the raw bytes list and own their own encoding
+        (base64, dataurl, multipart tuple, provider-specific). When the
+        transform is absent for a model the caller advertised as `multi_image`,
+        we log a warning and return None so the four paths fall back to
+        first-image-only (params["image"]). Empty / single-image requests
+        short-circuit and skip the hook entirely so the original code paths
+        run unchanged.
+        """
+        images = params.get("images")
+        if not images or len(images) <= 1:
+            return None
+        transform = self.preset.get("param_maps", {}).get("images_transform")
+        if transform is None:
+            log.warning(
+                f"Cloud: provider={self.provider_id} model={params.get('model')} got "
+                f"{len(images)} reference images but preset has no images_transform; "
+                f"falling back to first image only"
+            )
+            return None
+        return transform(images) or {}
+
     def generate_image(self, params: dict, on_progress: ProgressCallback = noop_progress) -> ImageResult:
         """Dispatch to the right image_via path based on preset and has_image.
 
@@ -281,6 +379,9 @@ class OpenAICompatAdapter:
         """Standard /v1/images/generations JSON post (OpenAI / NanoGPT txt2img / custom)."""
         body = self.build_image_params(params)
         body["model"] = params["model"]
+        multi = self.apply_images_transform(params)
+        if multi and multi.get("json"):
+            body.update(multi["json"])
         debug(f"Cloud: image request body provider={self.provider_id} body={body}")
         on_progress({"phase": "processing"})
         data = self.transport.post("/v1/images/generations", json=body)
@@ -299,7 +400,14 @@ class OpenAICompatAdapter:
         on_progress({"phase": "processing"})
         image_data = params["image"]
         self.validate_input_image(image_data, params["model"])
-        files: dict = {"image": ("input.png", image_data, "image/png")}
+        # Multi-image edits (e.g. OpenAI gpt-image-1 with `image[]`) come through
+        # apply_images_transform which returns the httpx-ready files object.
+        # Single-image (or missing transform) falls back to the singular `image`.
+        multi = self.apply_images_transform(params)
+        files: dict | list = (
+            multi["files"] if multi and multi.get("files")
+            else {"image": ("input.png", image_data, "image/png")}
+        )
         data_fields: dict = {"model": params["model"], "prompt": params.get("prompt", "")}
         if params.get("size"):
             data_fields["size"] = params["size"]
@@ -307,7 +415,11 @@ class OpenAICompatAdapter:
             data_fields["n"] = str(params["n"])
         if params.get("mask"):
             mask_data = self.invert_mask_for_openai(params["mask"])
-            files["mask"] = ("mask.png", mask_data, "image/png")
+            mask_entry = ("mask.png", mask_data, "image/png")
+            if isinstance(files, dict):
+                files["mask"] = mask_entry
+            else:
+                files = [*files, ("mask", mask_entry)]
         # files= triggers httpx multipart encoding with auto-generated boundary.
         # transport.build_headers() deliberately omits Content-Type so the
         # auto-detected multipart header wins (see transport.py:50-62).
@@ -329,11 +441,18 @@ class OpenAICompatAdapter:
         on_progress({"phase": "processing"})
         image_data = params["image"]
         self.validate_input_image(image_data, params["model"])
-        fmt = self.detect_format(image_data)
-        b64 = base64.b64encode(image_data).decode("ascii")
         body = self.build_image_params(params)
         body["model"] = params["model"]
-        body["imageDataUrl"] = f"data:image/{fmt};base64,{b64}"
+        # Multi-image dispatch: when the transform yielded a JSON payload it owns
+        # the multi-reference shape (e.g. Seedream's images: [{data: ...}, ...]).
+        # Otherwise build the single-image imageDataUrl as before.
+        multi = self.apply_images_transform(params)
+        if multi and multi.get("json"):
+            body.update(multi["json"])
+        else:
+            fmt = self.detect_format(image_data)
+            b64 = base64.b64encode(image_data).decode("ascii")
+            body["imageDataUrl"] = f"data:image/{fmt};base64,{b64}"
         if params.get("mask"):
             mask_b64 = base64.b64encode(params["mask"]).decode("ascii")
             body["maskDataUrl"] = f"data:image/png;base64,{mask_b64}"
@@ -352,7 +471,13 @@ class OpenAICompatAdapter:
         """Image generation via /v1/chat/completions (OpenRouter / multimodal chat)."""
         prompt = params.get("prompt", "")
         content: list[dict] | str = prompt
-        if params.get("image"):
+        # Multi-image dispatch goes through the transform's "content" key, which
+        # supplies the additional image_url parts. The text prompt is always
+        # prepended so the chat shape stays consistent.
+        multi = self.apply_images_transform(params)
+        if multi and multi.get("content"):
+            content = [{"type": "text", "text": prompt}, *multi["content"]]
+        elif params.get("image"):
             image_data = params["image"]
             self.validate_input_image(image_data, params["model"])
             fmt = self.detect_format(image_data)
@@ -893,6 +1018,15 @@ class OpenAICompatAdapter:
                         "default": pricing_resolutions[0],
                     })
 
+            # Multi-image capability resolution. Same precedence as
+            # size_constraint: JSON override wins, then live extraction
+            # (NanoGPT advertises max_images natively), then (False, None)
+            # default. Surfaced as two flat keys (no nested constraint object
+            # since the shape is just two scalars).
+            multi_info = get_multi_image_constraint(self.provider_id, model_id) or extract_multi_image_info(m, supported_params) or {}
+            multi_image = bool(multi_info.get("multi_image", False))
+            max_images = multi_info.get("max_images")
+
             normalized.append({
                 "source": "cloud",
                 "id": model_id,
@@ -906,6 +1040,8 @@ class OpenAICompatAdapter:
                 "description": m.get("description"),
                 "default_params": m.get("default_parameters"),
                 "size_constraint": size_constraint,
+                "multi_image": multi_image,
+                "max_images": max_images,
             })
         return normalized
 
