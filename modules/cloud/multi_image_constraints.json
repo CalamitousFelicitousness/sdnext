@@ -22,6 +22,11 @@
       "multi_image": true,
       "max_input_images": null,
       "_source": "probe-2026-05-18 (verified N=2)"
+    },
+    "nanogpt/wan2.7-image": {
+      "multi_image": true,
+      "max_input_images": null,
+      "_source": "probe-2026-05-18 (verified N=2 with 1024x1024 refs; WAN family has a minimum input-dimension floor that 64x64 test PNGs fail to clear)"
     }
   }
 }
