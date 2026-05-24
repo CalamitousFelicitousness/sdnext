@@ -629,6 +629,8 @@ def create_settings(cmd_opts):
         "cloud_default_video_provider": OptionInfo("", "Default cloud provider for video generation"),
         "cloud_default_audio_provider": OptionInfo("", "Default cloud provider for audio (TTS, STT)"),
         "cloud_default_provider": OptionInfo("", "Default cloud provider (fallback when modality-specific default is unset)"),
+        "cloud_image_size_validation": OptionInfo("soft", "Cloud image size validation", gr.Radio, {"choices": ["hard", "soft", "off"]}),
+        "cloud_size_validation_telemetry": OptionInfo("{}", "Cloud size validation telemetry (internal)", gr.TextArea, {"visible": False}),
         "outdir_cloud_image": OptionInfo("", "Folder for cloud-generated images (empty = use local txt2img/img2img dir)", component_args=hide_dirs, folder=True),
         "outdir_cloud_video": OptionInfo("", "Folder for cloud-generated videos (empty = use outdir_video)", component_args=hide_dirs, folder=True),
         "outdir_audio": OptionInfo("outputs/audio", "Folder for audio output (TTS, STT)", component_args=hide_dirs, folder=True),

@@ -11,8 +11,10 @@ Sync to match the rest of the cloud module. The shared.state title is
 """
 
 import io
+import json
 import random
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from PIL import Image
@@ -21,11 +23,21 @@ from modules import shared, images, paths
 from modules.logger import log
 
 from modules.cloud import registry
-from modules.cloud.errors import CloudError, ProviderError
-from modules.cloud.protocol import CloudUsage, ProgressCallback
+from modules.cloud.errors import CloudError, InputValidationError, ProviderError
+from modules.cloud.protocol import (
+    CloudUsage,
+    ProgressCallback,
+    SizeConstraint,
+    SizeConstraintBucket,
+    SizeConstraintEnum,
+    SizeConstraintFree,
+)
 
 
 STATE_TITLE = "Cloud-Image"
+
+TELEMETRY_WINDOW_DAYS = 90
+TELEMETRY_EVENTS = ("predicted_valid", "predicted_invalid_server_will_judge", "predicted_invalid_hard_block")
 
 
 @dataclass
@@ -41,6 +53,134 @@ class CloudImageGenResult:
     height: int = 0
     usage: CloudUsage | None = None
     info: dict = field(default_factory=dict)                # serialisable metadata dict
+
+
+def check_size_against_constraint(width: int, height: int, ask_auto: bool, constraint: SizeConstraint) -> tuple[bool, str]:
+    """Pure validation: does (width, height) satisfy the given constraint?
+
+    Returns (ok, reason). Reason is empty when ok=True; populated with a
+    one-sentence human-readable description otherwise.
+    """
+    if ask_auto:
+        if constraint.allow_auto:
+            return True, ""
+        return False, "model does not support size=auto"
+
+    if isinstance(constraint, SizeConstraintEnum):
+        size_str = f"{width}x{height}"
+        if size_str in constraint.options:
+            return True, ""
+        return False, f"size {size_str} not in enum options {constraint.options}"
+
+    if isinstance(constraint, SizeConstraintBucket):
+        size_str = f"{width}x{height}"
+        if size_str in constraint.options:
+            return True, ""
+        for dims in constraint.resolve.values():
+            if dims.get("w") == width and dims.get("h") == height:
+                return True, ""
+        return False, f"size {size_str} matches neither symbolic bucket {constraint.options} nor any resolved bucket dim"
+
+    if isinstance(constraint, SizeConstraintFree):
+        pixel_count = width * height
+        if constraint.min_pixel_count is not None and pixel_count < constraint.min_pixel_count:
+            return False, f"pixel count {pixel_count} below min {constraint.min_pixel_count}"
+        if constraint.max_pixel_count is not None and pixel_count > constraint.max_pixel_count:
+            return False, f"pixel count {pixel_count} above max {constraint.max_pixel_count}"
+        longest = max(width, height)
+        if constraint.min_longest_side is not None and longest < constraint.min_longest_side:
+            return False, f"longest side {longest} below min {constraint.min_longest_side}"
+        if constraint.max_longest_side is not None and longest > constraint.max_longest_side:
+            return False, f"longest side {longest} above max {constraint.max_longest_side}"
+        if height > 0:
+            ratio = width / height
+            if constraint.aspect_ratio_min is not None and ratio < constraint.aspect_ratio_min:
+                return False, f"aspect ratio {ratio:.3f} below min {constraint.aspect_ratio_min}"
+            if constraint.aspect_ratio_max is not None and ratio > constraint.aspect_ratio_max:
+                return False, f"aspect ratio {ratio:.3f} above max {constraint.aspect_ratio_max}"
+        if constraint.align is not None:
+            w_align, h_align = constraint.align if isinstance(constraint.align, tuple) else (constraint.align, constraint.align)
+            if width % w_align != 0:
+                return False, f"width {width} not aligned to {w_align}"
+            if height % h_align != 0:
+                return False, f"height {height} not aligned to {h_align}"
+        return True, ""
+
+    return True, ""  # unknown variant; defensive pass-through (typed union should make this unreachable)
+
+
+def record_size_validation_telemetry(provider_id: str, event: str) -> None:
+    """Increment a per-provider counter on the cloud_size_validation_telemetry hidden opt.
+
+    Resets the per-provider window if older than TELEMETRY_WINDOW_DAYS. The
+    opts.save() cadence (debounced) handles persistence; no separate JSON file
+    or fasteners locking. Silent on any failure since telemetry is best-effort.
+    """
+    if not hasattr(shared, "opts"):
+        return
+    try:
+        raw = getattr(shared.opts, "cloud_size_validation_telemetry", "{}")
+        data = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    bucket = data.setdefault(provider_id, {})
+    now = datetime.now(timezone.utc)
+    window_start_iso = bucket.get("window_start_iso")
+    reset_needed = True
+    if window_start_iso:
+        try:
+            window_start = datetime.fromisoformat(window_start_iso)
+            if (now - window_start).days < TELEMETRY_WINDOW_DAYS:
+                reset_needed = False
+        except ValueError:
+            pass
+    if reset_needed:
+        bucket["window_start_iso"] = now.isoformat()
+        for key in TELEMETRY_EVENTS:
+            bucket[key] = 0
+        bucket["total"] = 0
+    bucket[event] = bucket.get(event, 0) + 1
+    bucket["total"] = bucket.get("total", 0) + 1
+    try:
+        shared.opts.cloud_size_validation_telemetry = json.dumps(data)
+    except Exception as e:
+        log.debug(f"Cloud: telemetry persist failed: {e}")
+
+
+def run_size_preflight(provider_id: str, model: str, width: int, height: int, ask_auto: bool = False) -> None:
+    """Run pre-flight size validation per the cloud_image_size_validation setting.
+
+    The rollout is soft-then-hard: 'soft' logs a warning on mismatch but still
+    dispatches the request; 'hard' raises InputValidationError before any HTTP
+    call; 'off' skips validation entirely. Constraint absence (no entry for
+    this provider+model in size_constraints.json) is treated as 'no opinion'
+    and short-circuits.
+    """
+    mode = getattr(shared.opts, "cloud_image_size_validation", "soft") if hasattr(shared, "opts") else "soft"
+    if mode == "off":
+        return
+    from modules.cloud.adapter import get_size_constraint  # lazy to avoid import-cycle
+    constraint = get_size_constraint(provider_id, model)
+    if constraint is None:
+        return
+    ok, reason = check_size_against_constraint(width, height, ask_auto, constraint)
+    if ok:
+        record_size_validation_telemetry(provider_id, "predicted_valid")
+        return
+    if mode == "hard":
+        record_size_validation_telemetry(provider_id, "predicted_invalid_hard_block")
+        raise InputValidationError(
+            f"Cloud: requested size {width}x{height} does not satisfy {model} constraint ({reason}). Set cloud_image_size_validation=off to suppress this check.",
+            provider=provider_id,
+            field="size",
+            limit=constraint.model_dump(exclude_none=True),
+        )
+    # soft mode: warn but continue
+    record_size_validation_telemetry(provider_id, "predicted_invalid_server_will_judge")
+    log.warning(
+        f"Cloud: size_constraint mismatch provider={provider_id} model={model} requested={width}x{height} reason={reason} "
+        f"(set cloud_image_size_validation=hard to enforce client-side; cloud_image_size_validation=off to suppress this warning)"
+    )
 
 
 def resolve_outdir(is_img2img: bool) -> str:
@@ -201,6 +341,7 @@ def generate_image(
             if on_progress is not None:
                 on_progress(event)
 
+        run_size_preflight(provider_id, model, width, height)
         adapter = registry.get_adapter(provider_id)
         result = adapter.generate_image(adapter_params, progress_cb)
 

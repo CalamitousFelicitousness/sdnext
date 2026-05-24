@@ -11,16 +11,19 @@ NotImplementedError pending the video and audio code paths.
 """
 
 import base64
+import functools
 import io
 import os
 import struct
 import time
+from pathlib import Path
 
 import httpx
 from PIL import Image
-from pydantic import ValidationError  # pylint: disable=no-name-in-module
+from pydantic import TypeAdapter, ValidationError  # pylint: disable=no-name-in-module
 
 from modules import shared
+from modules.json_helpers import readfile
 from modules.logger import log
 
 from modules.cloud.errors import InputValidationError, ProviderError
@@ -31,6 +34,7 @@ from modules.cloud.protocol import (
     CloudUsage,
     ImageResult,
     ProgressCallback,
+    SizeConstraint,
     TranscribeResult,
     VideoResult,
 )
@@ -64,11 +68,54 @@ def noop_progress(_event: dict) -> None:
     """Default progress callback. Used when callers don't care about progress events."""
 
 
+# ---- size_constraints.json loader -------------------------------------------
+
+SIZE_CONSTRAINTS_PATH = Path(__file__).parent / "size_constraints.json"
+SIZE_CONSTRAINTS_SCHEMA_VERSION = 1
+_SIZE_CONSTRAINT_ADAPTER = TypeAdapter(SizeConstraint)
+
+
+@functools.cache
+def load_size_constraints() -> dict[str, SizeConstraint]:
+    """Parse size_constraints.json once per process, keyed by 'provider/model'.
+
+    Validation errors on individual entries are logged and the entry is skipped;
+    a single bad entry must not prevent the rest of the catalog from loading.
+    Unknown schema_version is treated as 'cannot interpret' and yields an empty
+    map (callers fall through to size_constraint=None for every model).
+    """
+    raw = readfile(str(SIZE_CONSTRAINTS_PATH), as_type="dict", silent=True)
+    if not raw:
+        return {}
+    if raw.get("schema_version") != SIZE_CONSTRAINTS_SCHEMA_VERSION:
+        log.warning(f"Cloud: size_constraints.json schema_version={raw.get('schema_version')} not supported (expected {SIZE_CONSTRAINTS_SCHEMA_VERSION}); ignoring")
+        return {}
+    out: dict[str, SizeConstraint] = {}
+    for key, payload in raw.get("entries", {}).items():
+        try:
+            out[key] = _SIZE_CONSTRAINT_ADAPTER.validate_python(payload)
+        except ValidationError as e:
+            log.warning(f"Cloud: size_constraints.json entry {key} failed validation: {e}")
+    return out
+
+
+def get_size_constraint(provider_id: str, model_id: str) -> SizeConstraint | None:
+    """Look up the constraint for a given provider+model pair.
+
+    Returns None when the entry is absent so callers can short-circuit
+    pre-flight validation without further checks.
+    """
+    return load_size_constraints().get(f"{provider_id}/{model_id}")
+
+
 class OpenAICompatAdapter:
     """Satisfies ProviderAdapter via structural typing (sync)."""
 
     # Models with fixed size enums that providers don't always advertise via
-    # supported_parameters. Used to populate the size constraint when missing.
+    # supported_parameters. Used to populate the supported_params.size enum
+    # when missing. Superseded by size_constraints.json (loaded via
+    # get_size_constraint); kept for one release as fallback for the four
+    # OpenAI models below, then this dict and get_size_constraints() retire.
     IMAGE_SIZE_CONSTRAINTS: dict[str, list[str]] = {
         "dall-e-2": ["256x256", "512x512", "1024x1024"],
         "dall-e-3": ["1024x1024", "1024x1792", "1792x1024"],
@@ -845,6 +892,7 @@ class OpenAICompatAdapter:
                 "supported_params": supported_params or None,
                 "description": m.get("description"),
                 "default_params": m.get("default_parameters"),
+                "size_constraint": get_size_constraint(self.provider_id, model_id),
             })
         return normalized
 
