@@ -116,18 +116,6 @@ def get_size_constraint(provider_id: str, model_id: str) -> SizeConstraint | Non
 class OpenAICompatAdapter:
     """Satisfies ProviderAdapter via structural typing (sync)."""
 
-    # Models with fixed size enums that providers don't always advertise via
-    # supported_parameters. Used to populate the supported_params.size enum
-    # when missing. Superseded by size_constraints.json (loaded via
-    # get_size_constraint); kept for one release as fallback for the four
-    # OpenAI models below, then this dict and get_size_constraints() retire.
-    IMAGE_SIZE_CONSTRAINTS: dict[str, list[str]] = {
-        "dall-e-2": ["256x256", "512x512", "1024x1024"],
-        "dall-e-3": ["1024x1024", "1024x1792", "1792x1024"],
-        "gpt-image-1": ["1024x1024", "1536x1024", "1024x1536", "auto"],
-        "gpt-image-1-mini": ["1024x1024", "1536x1024", "1024x1536", "auto"],
-    }
-
     def __init__(self, provider_id: str, base_url: str, preset: dict, key: str):
         self.provider_id = provider_id
         self.preset = preset
@@ -864,6 +852,7 @@ class OpenAICompatAdapter:
     # ---- model normalization -----------------------------------------------------
 
     def normalize_models(self, raw_models: list[dict]) -> list[dict]:
+        from modules.cloud.codify import codify_from_model
         normalized: list[dict] = []
         for m in raw_models:
             model_id = m.get("id", "")
@@ -874,15 +863,34 @@ class OpenAICompatAdapter:
             pricing = self.extract_pricing(m)
             supported_params = self.extract_supported_params(m) or []
 
+            # Resolution order: JSON override wins, then live
+            # codify-from-metadata, then None. JSON normally holds only the
+            # OpenAI hardcoded enums (since OpenAI's /v1/models doesn't carry
+            # resolutions); NanoGPT and other rich-metadata providers get
+            # constraints auto-extracted from each list_models response so they
+            # stay current without re-running a discovery sweep.
+            size_constraint = get_size_constraint(self.provider_id, model_id) or codify_from_model(m, supported_params)
+
+            # Back-compat: when supported_params doesn't already advertise a
+            # size enum and the new size_constraint provides equivalent data,
+            # derive the enum so legacy consumers reading supported_params.size
+            # keep working until they migrate.
             has_size_enum = any(p.get("name") == "size" for p in supported_params)
-            if not has_size_enum:
-                size_options = self.get_size_constraints(model_id) or self.extract_resolutions_from_pricing(m)
-                if size_options:
+            if not has_size_enum and size_constraint is not None and size_constraint.kind in ("enum", "bucket") and size_constraint.options:
+                supported_params.append({
+                    "name": "size",
+                    "type": "enum",
+                    "options": size_constraint.options,
+                    "default": size_constraint.default or size_constraint.options[0],
+                })
+            elif not has_size_enum:
+                pricing_resolutions = self.extract_resolutions_from_pricing(m)
+                if pricing_resolutions:
                     supported_params.append({
                         "name": "size",
                         "type": "enum",
-                        "options": size_options,
-                        "default": size_options[0],
+                        "options": pricing_resolutions,
+                        "default": pricing_resolutions[0],
                     })
 
             normalized.append({
@@ -897,16 +905,9 @@ class OpenAICompatAdapter:
                 "supported_params": supported_params or None,
                 "description": m.get("description"),
                 "default_params": m.get("default_parameters"),
-                "size_constraint": get_size_constraint(self.provider_id, model_id),
+                "size_constraint": size_constraint,
             })
         return normalized
-
-    def get_size_constraints(self, model_id: str) -> list[str] | None:
-        bare_id = model_id.split("/")[-1] if "/" in model_id else model_id
-        for family, sizes in self.IMAGE_SIZE_CONSTRAINTS.items():
-            if bare_id == family or bare_id.startswith(f"{family}:"):
-                return sizes
-        return None
 
     def infer_modalities(self, m: dict) -> list[str]:
         modalities: list[str] = []

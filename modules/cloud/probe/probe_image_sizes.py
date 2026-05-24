@@ -51,9 +51,9 @@ import os
 import time
 from datetime import datetime, timezone
 
-from modules.cloud import registry
+from modules.cloud import codify, registry
 from modules.cloud.adapter import SIZE_CONSTRAINTS_PATH
-from modules.cloud.probe import codify, grouping
+from modules.cloud.probe import grouping
 from modules.cloud.probe.discovery import harvest_provider_metadata
 from modules.cloud.protocol import SizeConstraint
 from modules.logger import log

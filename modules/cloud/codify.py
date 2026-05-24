@@ -1,24 +1,24 @@
-"""Convert metadata hints into SizeConstraint instances where possible.
+"""Convert provider model metadata into SizeConstraint instances.
 
-Pure functions, no I/O. Tested via test_probe_codify.py.
+Pure functions, no I/O. Runtime path consumed by adapter.normalize_models;
+also reused by the probe-tooling discovery pass for snapshot generation.
 
-The discovery pass (discovery.py) produces a `MetadataHints` dict per model
-from the provider's bulk list, per-model detail endpoint, pricing, and
-description. This module turns hints into SizeConstraint variants when the
-shape is unambiguous; returns None when generation probing is required to
-disambiguate.
+The codifier operates on a `MetadataHints` dict extracted by
+extract_hints_from_model from the raw provider model object plus the
+already-extracted supported_params list. Returns a SizeConstraint variant
+when the shape is unambiguous; returns None when no size data is present
+or when the shape is mixed (cannot disambiguate without a probe).
 
-Codification rules (conservative: when in doubt, return None so the caller
-runs a generation probe):
+Codification rules (conservative: when in doubt, return None):
 
   enum     when hints carry an explicit resolutions list of WxH strings
   bucket   when hints carry symbolic-label sizing (e.g. "1k"/"2k"/"4k")
-  free     not codifiable from metadata alone; always requires probing
-  None     hints insufficient; generation probe required
+  free     not codifiable from metadata alone; would require a probe
+  None     hints insufficient; pre-flight short-circuits (no constraint)
 """
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from modules.cloud.protocol import (
     SizeConstraint,
@@ -89,9 +89,8 @@ def codify_from_resolutions(resolutions: list[str], default: str | None = None) 
     auto_wire: Literal["literal", "omit", "default"] | None = "literal" if allow_auto else None
 
     if not non_auto:
-        # auto-only list: empty enum with allow_auto=True
         if default and default.lower() == "auto":
-            default = None  # 'auto' is signalled by allow_auto, not stored as a literal option
+            default = None
         return SizeConstraintEnum(options=[], allow_auto=True, auto_wire=auto_wire, default=default)
 
     all_wxh = all(looks_like_wxh(r) for r in non_auto)
@@ -105,7 +104,7 @@ def codify_from_resolutions(resolutions: list[str], default: str | None = None) 
         resolve = {label: dims for label in normalized if (dims := bucket_label_to_dims(label)) is not None}
         chosen_default = default if default in normalized else None
         return SizeConstraintBucket(options=normalized, resolve=resolve, allow_auto=allow_auto, auto_wire=auto_wire, default=chosen_default)
-    return None  # mixed remainder - probe required
+    return None  # mixed remainder; constraint unrecoverable from metadata alone
 
 
 def codify_from_pricing_keys(pricing_keys: list[str]) -> SizeConstraint | None:
@@ -120,12 +119,10 @@ def codify_from_hints(hints: dict) -> SizeConstraint | None:
     returns the first successful match or None.
 
     Priority:
-      1. hints["resolutions"] (most provider-explicit signal)
-      2. hints["sizes"] (alias some providers use)
-      3. hints["pricing_keys"] (Replicate-style per-resolution charging)
-
-    Caller propagates allow_auto / auto_wire / default from elsewhere if a
-    constraint comes back; codify only handles the kind+options/resolve.
+      1. hints["resolutions"]    (most provider-explicit signal)
+      2. hints["sizes"]          (alias some providers use)
+      3. hints["size_options"]   (alias some providers use)
+      4. hints["pricing_keys"]   (Replicate-style per-resolution charging)
     """
     for key in ("resolutions", "sizes", "size_options"):
         if isinstance(hints.get(key), list):
@@ -138,3 +135,47 @@ def codify_from_hints(hints: dict) -> SizeConstraint | None:
         if constraint is not None:
             return constraint
     return None
+
+
+def extract_hints_from_model(raw_model: dict, supported_params: list[dict] | None) -> dict[str, Any]:
+    """Build a hints dict from a raw provider model object plus already-
+    extracted supported_params list.
+
+    Sources, in priority order:
+      - supported_params entry where name=='size' and type=='enum'
+      - top-level raw_model['supported_parameters']['resolutions'] (NanoGPT)
+      - raw_model['pricing']['per_image'].keys() (NanoGPT/Replicate-style)
+      - raw_model['description'] (last-resort hint for human inspection)
+    """
+    hints: dict[str, Any] = {}
+    supported_params = supported_params or []
+    for param in supported_params:
+        if param.get("name") == "size" and param.get("type") == "enum":
+            options = param.get("options") or []
+            if options:
+                hints["resolutions"] = list(options)
+            if param.get("default"):
+                hints["default_size"] = param["default"]
+            break
+    if "resolutions" not in hints:
+        raw_supported = raw_model.get("supported_parameters")
+        if isinstance(raw_supported, dict):
+            res = raw_supported.get("resolutions")
+            if isinstance(res, list) and res:
+                hints["resolutions"] = list(res)
+    pricing = raw_model.get("pricing")
+    if isinstance(pricing, dict):
+        per_image = pricing.get("per_image")
+        if isinstance(per_image, dict):
+            res_like_keys = [k for k in per_image.keys() if isinstance(k, str) and looks_like_wxh(k.replace("*", "x"))]
+            if res_like_keys:
+                hints["pricing_keys"] = [k.replace("*", "x") for k in res_like_keys]
+    description = raw_model.get("description") or raw_model.get("desc")
+    if description:
+        hints["description"] = description
+    return hints
+
+
+def codify_from_model(raw_model: dict, supported_params: list[dict] | None) -> SizeConstraint | None:
+    """One-shot entry for adapter.normalize_models: extract hints + codify."""
+    return codify_from_hints(extract_hints_from_model(raw_model, supported_params))
