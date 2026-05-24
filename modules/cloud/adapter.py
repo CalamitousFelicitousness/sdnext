@@ -26,6 +26,7 @@ from modules import shared
 from modules.json_helpers import readfile
 from modules.logger import log
 
+from modules.cloud.encoding import detect_image_format
 from modules.cloud.errors import InputValidationError, ProviderError
 from modules.cloud.presets import resolve_input_limits
 from modules.cloud.protocol import (
@@ -945,14 +946,13 @@ class OpenAICompatAdapter:
 
     @staticmethod
     def detect_format(image_data: bytes) -> str:
-        """Sniff PNG / JPEG / WEBP from header. Defaults to png."""
-        if image_data[:8] == b"\x89PNG\r\n\x1a\n":
-            return "png"
-        if image_data[:2] == b"\xff\xd8":
-            return "jpeg"
-        if len(image_data) >= 12 and image_data[:4] == b"RIFF" and image_data[8:12] == b"WEBP":
-            return "webp"
-        return "png"
+        """Sniff PNG / JPEG / WEBP from header. Defaults to png.
+
+        Delegates to the module-level `detect_image_format` so preset
+        `images_transform` lambdas (which don't have an adapter instance) can
+        call the same detector without reaching back into the adapter class.
+        """
+        return detect_image_format(image_data)
 
     @staticmethod
     def read_image_dimensions(data: bytes) -> tuple[int, int] | None:

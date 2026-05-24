@@ -8,7 +8,26 @@ input_limits).
 Chat and image generation consume the chat / auth / model_list / image
 portions today; audio and video parameter maps are carried unchanged so the
 video and audio code paths can plug straight in.
+
+Each preset's param_maps may include an optional `images_transform` lambda.
+The transform receives the raw bytes list (already validated for size /
+format upstream by the adapter) and returns a dict whose optional keys are
+consumed by the matching `_via_*` dispatch path:
+
+    {"json":    dict, ...}    # merged into the outgoing JSON body
+    {"files":   list, ...}    # passed to httpx multipart `files=`
+    {"content": list, ...}    # appended to chat content parts
+
+Transforms are *capability advertisements*: a preset that defines one
+declares that its provider can accept multi-image input on the dispatch
+path implied by `image_via`. Models within that preset still need
+`multi_image=true` (from live extraction or JSON override) for the
+preflight to clear. When a multi-image request reaches a preset without
+an `images_transform`, the adapter degrades to first-image-only and logs.
 """
+
+
+from modules.cloud.encoding import detect_image_format, to_dataurl
 
 
 DEFAULT_CHAT_PARAMS = {
@@ -61,6 +80,64 @@ def size_transform_wxh(w: int, h: int) -> dict:
     return {"size": f"{w}x{h}"}
 
 
+# These transforms are drafted from provider docs; the live probe sweep
+# verifies and corrects each shape per priority model. Each transform
+# receives the raw bytes list and returns the dispatch-path-specific
+# payload (see module docstring).
+
+
+def nanogpt_images_transform(images: list[bytes]) -> dict:
+    """NanoGPT dataurl-path multi-image: plural of the single-image field.
+
+    Single-image (existing): `imageDataUrl: "data:image/...;base64,..."`.
+    Multi-image (drafted from the singular-vs-plural convention): an array of
+    the same dataurl strings under `imageDataUrls`. Probe sweep against
+    Seedream multi-ref / Nano Banana / Flux Kontext will confirm or correct
+    per-model. Some NanoGPT model families may instead expect `images: [...]`
+    or `reference_images: [...]`; capture in cassettes and override at the
+    per-model level via a future preset family if the shape diverges.
+    """
+    return {"json": {"imageDataUrls": [to_dataurl(img) for img in images]}}
+
+
+def openai_images_transform(images: list[bytes]) -> dict:
+    """OpenAI `/v1/images/edits` multi-image multipart per gpt-image-1.
+
+    The standard HTML-form-encoding for repeated fields: each image is sent as
+    a separate `image[]` part. httpx accepts the list-of-tuples form of
+    `files=` to produce this on the wire. Format is forced to PNG to match
+    the existing single-image edit path's `image/png` content type; OpenAI
+    accepts PNG and JPEG for edits but PNG is the safe default for the format
+    we already detect upstream.
+    """
+    return {"files": [
+        ("image[]", (f"input_{i}.{detect_image_format(img)}", img, f"image/{detect_image_format(img)}"))
+        for i, img in enumerate(images)
+    ]}
+
+
+def openrouter_images_transform(images: list[bytes]) -> dict:
+    """OpenRouter chat-completions multi-image content parts.
+
+    Each reference becomes its own `image_url` content part appended after
+    the text prompt. The dispatch path (`generate_image_via_chat`) prepends
+    the text part, so the transform only emits the image parts. Format
+    detected per-image for the dataurl MIME hint.
+    """
+    return {"content": [
+        {"type": "image_url", "image_url": {"url": to_dataurl(img)}}
+        for img in images
+    ]}
+
+
+# AIHubMix passes through to OpenAI for gpt-image-1, so the same multipart
+# image[] shape works there. Other AIHubMix-hosted models (Wavespeed, Pruna,
+# etc.) have varying shapes that need per-preset-family handling once those
+# families exist; for now, AIHubMix multi-image reuses the OpenAI transform
+# and degrades to first-image-only for non-OpenAI-shaped models.
+aihubmix_images_transform = openai_images_transform
+
+
 PRESETS: dict[str, dict] = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api",
@@ -77,6 +154,7 @@ PRESETS: dict[str, dict] = {
                 "seed": ("seed", lambda v: v if v >= 0 else None),
             },
             "image_size_transform": size_transform_wxh,
+            "images_transform": openrouter_images_transform,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
             "video": DEFAULT_VIDEO_PARAMS,
@@ -106,6 +184,7 @@ PRESETS: dict[str, dict] = {
         "param_maps": {
             "image": DEFAULT_IMAGE_PARAMS,
             "image_size_transform": size_transform_wxh,
+            "images_transform": openai_images_transform,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
             "video": DEFAULT_VIDEO_PARAMS,
@@ -142,6 +221,7 @@ PRESETS: dict[str, dict] = {
         "param_maps": {
             "image": DEFAULT_IMAGE_PARAMS,
             "image_size_transform": size_transform_wxh,
+            "images_transform": nanogpt_images_transform,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
             "video": DEFAULT_VIDEO_PARAMS,
@@ -171,6 +251,7 @@ PRESETS: dict[str, dict] = {
         "param_maps": {
             "image": DEFAULT_IMAGE_PARAMS,
             "image_size_transform": size_transform_wxh,
+            "images_transform": aihubmix_images_transform,
             "chat": DEFAULT_CHAT_PARAMS,
             "tts": DEFAULT_TTS_PARAMS,
             "video": DEFAULT_VIDEO_PARAMS,
