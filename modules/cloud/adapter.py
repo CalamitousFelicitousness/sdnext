@@ -125,8 +125,8 @@ def load_multi_image_constraints() -> dict[str, dict]:
     """Parse multi_image_constraints.json once per process, keyed by 'provider/model'.
 
     Each entry is a plain dict with two recognised keys:
-      multi_image: bool       (default False)
-      max_images:  int | None (default None; None means uncapped or unknown)
+      multi_image:      bool       (default False)
+      max_input_images: int | None (default None; None means uncapped or unknown)
 
     Underscore-prefixed keys carry provenance metadata (e.g. probe source) and
     are stripped at load time. Unknown schema_version yields an empty map so
@@ -146,7 +146,7 @@ def load_multi_image_constraints() -> dict[str, dict]:
         clean = {k: v for k, v in payload.items() if not k.startswith("_")}
         out[key] = {
             "multi_image": bool(clean.get("multi_image", False)),
-            "max_images": clean.get("max_images"),
+            "max_input_images": clean.get("max_input_images"),
         }
     return out
 
@@ -154,28 +154,31 @@ def load_multi_image_constraints() -> dict[str, dict]:
 def get_multi_image_constraint(provider_id: str, model_id: str) -> dict | None:
     """JSON-side override lookup for the (provider, model) pair.
 
-    Returns the {multi_image, max_images} dict when an entry exists, else None
-    so the caller can fall through to live extraction.
+    Returns the {multi_image, max_input_images} dict when an entry exists,
+    else None so the caller can fall through to live extraction.
     """
     return load_multi_image_constraints().get(f"{provider_id}/{model_id}")
 
 
 def extract_multi_image_info(raw_model: dict, supported_params: list[dict] | None) -> dict | None:
-    """Live extraction of multi_image / max_images from provider metadata.
+    """Live extraction of multi-image input capability from provider metadata.
 
-    Currently reads NanoGPT's `supported_parameters.max_images` directly off the
-    raw model body. OpenRouter and OpenAI presets do not advertise; they return
-    None (caller falls through to JSON override or default-False).
+    Returns `{"multi_image": bool, "max_input_images": int | None}` when the
+    provider advertises an *input-side* multi-image cap, None otherwise.
+
+    NanoGPT's `supported_parameters.max_images` was originally interpreted
+    as the input cap, but it also appears on text-only models (e.g.
+    `pruna-ai/p-image/text-to-image`), which proves it's the maximum
+    *output* `n` per request, not an input constraint. NanoGPT's
+    `/v1/image-models` does not currently expose any field that would tell
+    us the multi-image-input cap; rely on JSON override via
+    `multi_image_constraints.json` instead.
 
     `supported_params` is the already-normalised descriptor list (kept for
     future per-provider hooks); the dict-shape live data lives on `raw_model`.
     """
     _ = supported_params  # reserved for future per-provider hook
-    supported = raw_model.get("supported_parameters")
-    if isinstance(supported, dict):
-        max_images = supported.get("max_images")
-        if isinstance(max_images, int) and max_images > 0:
-            return {"multi_image": max_images > 1, "max_images": max_images}
+    _ = raw_model
     return None
 
 
@@ -1020,12 +1023,14 @@ class OpenAICompatAdapter:
 
             # Multi-image capability resolution. Same precedence as
             # size_constraint: JSON override wins, then live extraction
-            # (NanoGPT advertises max_images natively), then (False, None)
-            # default. Surfaced as two flat keys (no nested constraint object
-            # since the shape is just two scalars).
+            # (currently no provider exposes a usable signal; see
+            # extract_multi_image_info docstring re: NanoGPT's max_images
+            # actually being the output-n cap, not the input cap), then
+            # (False, None) default. Surfaced as two flat keys (no nested
+            # constraint object since the shape is just two scalars).
             multi_info = get_multi_image_constraint(self.provider_id, model_id) or extract_multi_image_info(m, supported_params) or {}
             multi_image = bool(multi_info.get("multi_image", False))
-            max_images = multi_info.get("max_images")
+            max_input_images = multi_info.get("max_input_images")
 
             normalized.append({
                 "source": "cloud",
@@ -1041,7 +1046,7 @@ class OpenAICompatAdapter:
                 "default_params": m.get("default_parameters"),
                 "size_constraint": size_constraint,
                 "multi_image": multi_image,
-                "max_images": max_images,
+                "max_input_images": max_input_images,
             })
         return normalized
 
@@ -1118,6 +1123,11 @@ class OpenAICompatAdapter:
 
     def extract_supported_params_dict(self, supported: dict) -> list[dict] | None:
         # NanoGPT format: {"resolutions": [...], "max_images": 4, ...}
+        # Note: NanoGPT's `max_images` is the maximum output `n` per request,
+        # not the multi-image input cap (verified by it appearing on text-only
+        # models like pruna-ai/p-image/text-to-image). This extractor only
+        # surfaces resolutions; multi-image-input capability lives in
+        # multi_image_constraints.json via JSON override.
         descriptors: list[dict] = []
         resolutions = supported.get("resolutions")
         if resolutions and isinstance(resolutions, list):

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated": "2026-05-17T00:00:00Z",
-  "_notes": "Entries here override the live extraction in adapter.normalize_models. Add a provider/model entry only when the provider does not advertise max_images via supported_parameters AND you have authoritative knowledge of the constraint. NanoGPT advertises max_images natively in /v1/image-models supported_parameters; entries here would only be needed to override that live data or to record multi-image capability for providers whose metadata is silent.",
+  "generated": "2026-05-18T00:00:00Z",
+  "_notes": "Entries here advertise per-model multi-image *input* capability for cloud providers. Schema per entry: {multi_image: bool, max_input_images: int | null}. multi_image=true means the model accepts >1 reference image per request; max_input_images is the cap (null = uncapped or unknown). Live extraction from provider metadata is not currently usable for this signal (NanoGPT's supported_parameters.max_images turns out to be the output-n cap, not the input cap — see adapter.extract_multi_image_info docstring), so this file is the authoritative source. Populate per model via the Phase 2.6 step 5B probe sweep.",
   "entries": {}
 }

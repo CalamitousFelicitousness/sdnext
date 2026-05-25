@@ -269,22 +269,22 @@ def run_image_count_preflight(provider_id: str, model: str, image_count: int) ->
     constraint = get_multi_image_constraint(provider_id, model)
     if constraint is None:
         return  # JSON has no opinion; live-extracted constraint isn't consulted here by design
-    max_images = constraint.get("max_images")
-    if max_images is None or image_count <= max_images:
+    max_input_images = constraint.get("max_input_images")
+    if max_input_images is None or image_count <= max_input_images:
         record_image_count_validation_telemetry(provider_id, "predicted_valid")
         return
     if mode == "hard":
         record_image_count_validation_telemetry(provider_id, "predicted_invalid_hard_block")
         raise InputValidationError(
-            f"Cloud: {image_count} reference images supplied but {model} accepts at most {max_images}. "
+            f"Cloud: {image_count} reference images supplied but {model} accepts at most {max_input_images}. "
             f"Set cloud_image_count_validation=off to suppress this check.",
             provider=provider_id,
             field="image_count",
-            limit={"max": max_images},
+            limit={"max": max_input_images},
         )
     record_image_count_validation_telemetry(provider_id, "predicted_invalid_server_will_judge")
     log.warning(
-        f"Cloud: image_count mismatch provider={provider_id} model={model} requested={image_count} max={max_images} "
+        f"Cloud: image_count mismatch provider={provider_id} model={model} requested={image_count} max={max_input_images} "
         f"(set cloud_image_count_validation=hard to enforce client-side; cloud_image_count_validation=off to suppress this warning)"
     )
 
