@@ -49,6 +49,8 @@ pipe_switch_task_exclude = [
     'StableDiffusionXLInstantIDPipeline',
     'XOmniPipeline',
     'HunyuanImagePipeline',
+    'HunyuanImage3Wrapper',
+    'HunyuanImage3InstructWrapper',
     'NucleusMoEImagePipeline',
     'AuraFlowPipeline',
     'ChronoEditPipeline',
