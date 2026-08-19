@@ -203,7 +203,7 @@ class HunyuanImage3Wrapper(torch.nn.Module):
     ):
         self.set_diffusion_config(num_inference_steps, guidance_scale)
 
-        if num_inference_steps > 1:
+        if num_images_per_prompt > 1:
             if isinstance(prompt, str):
                 prompt = [prompt]
             prompt = prompt * num_images_per_prompt
