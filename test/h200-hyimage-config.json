@@ -1,0 +1,47 @@
+{
+  "sd_checkpoint_autoload": false,
+  "diffusers_offload_mode": "none",
+  "diffusers_offload_streams": true,
+  "diffusers_offload_min_gpu_memory": 0.1,
+  "diffusers_offload_max_gpu_memory": 0.7,
+  "diffusers_offload_always": "text_encoder, text_encoder_2, text_encoder_3",
+  "group_offload_stream": true,
+  "group_offload_record": true,
+  "diffusers_vae_tiling": true,
+  "sdp_overrides": [
+    "SDNQ attention"
+  ],
+  "sdnq_attention_use_hadamard": true,
+  "sdnq_attention_pv_matmul_type": "int8",
+  "sdnq_quantize_matmul_mode": "enabled",
+  "sdnq_quantize_matmul_mode_te": "Same as model",
+  "sdnq_quantize_weights": [
+    "Model",
+    "TE"
+  ],
+  "sdnq_quantize_weights_mode": "uint4",
+  "sdnq_use_hadamard": true,
+  "sdnq_use_dynamic_quantization": true,
+  "sdnq_use_codebook": true,
+  "sdnq_modules_dtype_dict": "",
+  "cuda_compile_mode": "max-autotune",
+  "cuda_compile_options": [
+    "repeated",
+    "fullgraph",
+    "dynamic",
+    "verbose"
+  ],
+  "hf_transfer_mode": "xet",
+  "samples_format": "png",
+  "save_txt": true,
+  "save_to_dirs": true,
+  "directories_filename_pattern": "[model_name]",
+  "samples_filename_pattern": "[datetime]-[model_name]-[sampler]-[seq]",
+  "save_images_add_number": false,
+  "keep_incomplete": false,
+  "schedulers_fallback": false,
+  "sd_textencder_linebreak": false,
+  "sd_textencoder_cache_size": 0,
+  "diffusers_enable_embed": false,
+  "lora_fuse_native": false
+}

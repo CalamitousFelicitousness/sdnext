@@ -1,0 +1,11 @@
+{
+  "prompt": "a lighthouse on a rocky coastline at golden hour, crashing waves, dramatic clouds, photorealistic",
+  "negative_prompt": "",
+  "steps": 8,
+  "cfg_scale": 2.5,
+  "width": 1024,
+  "height": 1024,
+  "seed": 42,
+  "batch_size": 1,
+  "save_images": true
+}
