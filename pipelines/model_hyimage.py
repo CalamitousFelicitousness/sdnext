@@ -160,6 +160,9 @@ class HunyuanImage3Wrapper(torch.nn.Module):
                 time.sleep(0.1)
             mode = kwargs.get('mode', None)
             if mode == 'gen_text':
+                if kwargs.get('tokenizer_output', None) is not None: # prefill carries tokenizer_output, decode steps do not
+                    shared.state.textinfo = 'Prompt processing'
+                    return
                 counts['text'] += 1
                 shared.state.textinfo = f'Think token {counts["text"]}'
             elif mode is not None:
