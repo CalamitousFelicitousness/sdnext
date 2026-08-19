@@ -1622,7 +1622,7 @@ def hf_auth_check(checkpoint_info: CheckpointInfo | str, force:bool=False):
             fn = checkpoint_info.path if isinstance(checkpoint_info, CheckpointInfo) else checkpoint_info
             if (fn.endswith('.safetensors') and os.path.isfile(fn)): # skip check for single-file safetensors models
                 return True
-            if os.path.exists(fn) and os.path.isdir(fn) and any(os.path.isfile(os.path.join(fn, f)) for f in ('model_index.json', 'modular_model_index.json')): # skip check for local diffusers folders
+            if os.path.exists(fn) and os.path.isdir(fn) and any(os.path.isfile(os.path.join(fn, f)) for f in ('model_index.json', 'modular_model_index.json', 'config.json')): # skip check for local model folders
                 return True
         except Exception:
             pass
