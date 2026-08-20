@@ -278,7 +278,7 @@ class HunyuanImage3InstructWrapper(HunyuanImage3Wrapper):
         try:
             cot_text, samples = self.model.generate_image(
                 prompt=prompts,
-                image=[images] * len(prompts) if images else None, # per-sample image lists must match batch size
+                image=images if images else None, # check_inputs wants a flat reference list, nested lists are rejected
                 seed=resolve_seeds(seed, len(prompts)),
                 image_size=image_size,
                 infer_align_image_size=align_size,

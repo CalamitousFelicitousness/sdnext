@@ -24,10 +24,12 @@ def fix_prompt_batch(p, prompts, negative_prompts, prompts_2, negative_prompts_2
         negative_prompts = [negative_prompts]
 
     if hasattr(p, 'init_images') and (p.init_images is not None) and (len(p.init_images) > 1) and not getattr(p, 'skip_processing', False):
-        while len(prompts) < len(p.init_images):
-            prompts.append(prompts[-1] if prompts else '')
-        while len(negative_prompts) < len(p.init_images):
-            negative_prompts.append(negative_prompts[-1] if negative_prompts else '')
+        from modules import sd_models
+        if sd_models.get_diffusers_task(shared.sd_model) != sd_models.DiffusersTaskType.INSTRUCT: # instruct references condition one job, not a batch
+            while len(prompts) < len(p.init_images):
+                prompts.append(prompts[-1] if prompts else '')
+            while len(negative_prompts) < len(p.init_images):
+                negative_prompts.append(negative_prompts[-1] if negative_prompts else '')
 
     while len(prompts) < p.batch_size:
         prompts.append(prompts[-1] if prompts else '')
