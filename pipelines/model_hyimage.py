@@ -76,6 +76,37 @@ def hijack_to_device(pipe):
     mod.to_device = to_device
 
 
+def hijack_moe_sparse(pipe):
+    # the eager moe forward dispatches through dense [tokens, experts, capacity] tensors that
+    # grow quadratically with sequence length; reference-image edits push them past 90GB. With
+    # moe_drop_tokens off and norm_topk_prob on that machinery is equivalent to the model's own
+    # easy_topk gate, so route each token to its topk experts by index instead
+    mod = sys.modules.get(pipe.__class__.__module__)
+    cls = getattr(mod, 'HunyuanMoE', None)
+    if cls is None or getattr(cls.forward, 'sdnext_sparse_dispatch', False):
+        return
+
+    def forward(self, hidden_states):
+        bsz, seq_len, hidden_size = hidden_states.shape
+        shared_output = self.shared_mlp(hidden_states) if self.config.use_mixed_mlp_moe else None
+        tokens = hidden_states.reshape(-1, hidden_size)
+        topk_weight, topk_index = self.gate(hidden_states, topk_impl='easy')
+        flat_index = topk_index.reshape(-1)
+        flat_weight = topk_weight.reshape(-1).float()
+        token_index = torch.arange(tokens.shape[0], device=tokens.device).repeat_interleave(topk_index.shape[-1])
+        output = torch.zeros(tokens.shape, dtype=torch.float32, device=tokens.device)
+        for expert_id in flat_index.unique().tolist():
+            routed = flat_index == expert_id
+            positions = token_index[routed]
+            expert_output = self.experts[expert_id](tokens[positions].unsqueeze(0)).squeeze(0) # expert mlps chunk gate_and_up on dim 2
+            output.index_add_(0, positions, expert_output.float() * flat_weight[routed].unsqueeze(-1))
+        output = output.to(hidden_states.dtype).reshape(bsz, seq_len, hidden_size)
+        return output if shared_output is None else shared_output + output
+
+    forward.sdnext_sparse_dispatch = True
+    cls.forward = forward
+
+
 def load_hyimage(checkpoint_info, diffusers_load_config=None): # pylint: disable=unused-argument
     if diffusers_load_config is None:
         diffusers_load_config = {}
@@ -150,6 +181,7 @@ def load_hyimage3(checkpoint_info, diffusers_load_config=None): # pylint: disabl
     pipe.pipeline # noqa: B018 # call it to set up pipeline # pylint: disable=pointless-statement
     hijack_vit_processor(pipe)
     hijack_to_device(pipe)
+    hijack_moe_sparse(pipe)
     is_instruct = getattr(pipe.generation_config, 'sequence_template', 'pretrain') == 'instruct'
     log.debug(f'Load model: type=HunyuanImage3 variant={"instruct" if is_instruct else "base"}')
     pipe = HunyuanImage3InstructWrapper(pipe) if is_instruct else HunyuanImage3Wrapper(pipe)
