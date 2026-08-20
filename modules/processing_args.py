@@ -59,7 +59,10 @@ def task_specific_kwargs(p, model):
             p.init_images = [helpers.decode_base64_to_image(i, quiet=True) for i in p.init_images]
         if isinstance(p.init_images[0], Image.Image):
             p.init_images = [i.convert('RGB') if i.mode != 'RGB' else i for i in p.init_images if i is not None]
-    width, height = processing_helpers.resize_init_images(p)
+    if task_type == sd_models.DiffusersTaskType.INSTRUCT and len(getattr(p, 'init_images', [])) > 0:
+        width, height = None, None # references pass at original size: the pipeline buckets each image by its own aspect ratio and sizes the output from the input
+    else:
+        width, height = processing_helpers.resize_init_images(p)
     if (task_type == sd_models.DiffusersTaskType.TEXT_2_IMAGE or len(getattr(p, 'init_images', [])) == 0) and not is_img2img_model and 'video' not in p.ops:
         p.ops.append('txt2img')
         if hasattr(p, 'width') and hasattr(p, 'height'):
@@ -109,8 +112,8 @@ def task_specific_kwargs(p, model):
     elif task_type == sd_models.DiffusersTaskType.INSTRUCT and len(getattr(p, 'init_images', [])) > 0:
         p.ops.append('instruct')
         task_args = {
-            'width': width if hasattr(p, 'width') else None,
-            'height': height if hasattr(p, 'height') else None,
+            'width': width,
+            'height': height,
             'image': p.init_images,
             'strength': p.denoising_strength,
         }
