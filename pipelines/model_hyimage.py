@@ -1,3 +1,4 @@
+import sys
 import time
 import functools
 from types import SimpleNamespace
@@ -56,6 +57,23 @@ def hijack_vit_processor(pipe):
     vit_info = getattr(getattr(pipe, 'image_processor', None), 'vit_info', None)
     if vit_info is not None and not isinstance(vit_info.processor, functools.partial):
         vit_info.processor = functools.partial(vit_info.processor, return_tensors='pt')
+
+
+def hijack_to_device(pipe):
+    # the remote code's to_device helper handles tensors and lists but passes dicts
+    # through untouched, leaving the vit attention mask and spatial shapes on cpu
+    mod = sys.modules.get(pipe.__class__.__module__)
+    original = getattr(mod, 'to_device', None)
+    if original is None or getattr(original, 'sdnext_handles_dict', False):
+        return
+
+    def to_device(data, device):
+        if isinstance(data, dict):
+            return {k: to_device(v, device) for k, v in data.items()}
+        return original(data, device)
+
+    to_device.sdnext_handles_dict = True
+    mod.to_device = to_device
 
 
 def load_hyimage(checkpoint_info, diffusers_load_config=None): # pylint: disable=unused-argument
@@ -131,6 +149,7 @@ def load_hyimage3(checkpoint_info, diffusers_load_config=None): # pylint: disabl
 
     pipe.pipeline # noqa: B018 # call it to set up pipeline # pylint: disable=pointless-statement
     hijack_vit_processor(pipe)
+    hijack_to_device(pipe)
     is_instruct = getattr(pipe.generation_config, 'sequence_template', 'pretrain') == 'instruct'
     log.debug(f'Load model: type=HunyuanImage3 variant={"instruct" if is_instruct else "base"}')
     pipe = HunyuanImage3InstructWrapper(pipe) if is_instruct else HunyuanImage3Wrapper(pipe)
