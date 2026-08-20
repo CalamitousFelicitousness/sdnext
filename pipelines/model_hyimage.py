@@ -1,4 +1,5 @@
 import time
+import functools
 from types import SimpleNamespace
 import torch
 import transformers
@@ -47,6 +48,14 @@ def hijack_update_model_kwargs(pipe):
 
     _update_model_kwargs_for_generation.sdnext_keeps_use_cache = True
     cls._update_model_kwargs_for_generation = _update_model_kwargs_for_generation # pylint: disable=protected-access
+
+
+def hijack_vit_processor(pipe):
+    # transformers 5 fast image processors return lists unless return_tensors is set,
+    # but vit_process_image squeezes pixel_values as a tensor
+    vit_info = getattr(getattr(pipe, 'image_processor', None), 'vit_info', None)
+    if vit_info is not None and not isinstance(vit_info.processor, functools.partial):
+        vit_info.processor = functools.partial(vit_info.processor, return_tensors='pt')
 
 
 def load_hyimage(checkpoint_info, diffusers_load_config=None): # pylint: disable=unused-argument
@@ -121,6 +130,7 @@ def load_hyimage3(checkpoint_info, diffusers_load_config=None): # pylint: disabl
     pipe.load_tokenizer(repo_id)
 
     pipe.pipeline # noqa: B018 # call it to set up pipeline # pylint: disable=pointless-statement
+    hijack_vit_processor(pipe)
     is_instruct = getattr(pipe.generation_config, 'sequence_template', 'pretrain') == 'instruct'
     log.debug(f'Load model: type=HunyuanImage3 variant={"instruct" if is_instruct else "base"}')
     pipe = HunyuanImage3InstructWrapper(pipe) if is_instruct else HunyuanImage3Wrapper(pipe)
