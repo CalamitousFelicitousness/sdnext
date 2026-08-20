@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import functools
@@ -326,6 +327,9 @@ class HunyuanImage3InstructWrapper(HunyuanImage3Wrapper):
         if image is not None:
             images = [i for i in image if i is not None] if isinstance(image, list) else [image]
         image_size, align_size = self.resolve_instruct_image_size(images, height, width)
+
+        # 'image' skips the think and recaption stages and diffuses from the raw prompt
+        bot_task = bot_task or os.environ.get('SD_HYIMAGE_BOT_TASK') or None
 
         call_args = {}
         if bot_task is not None:
