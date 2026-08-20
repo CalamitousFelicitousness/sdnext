@@ -196,6 +196,9 @@ def process_base(p: processing.StableDiffusionProcessing):
             output.frames = output.videos # modular video pipelines emit videos, not frames
         if hasattr(output, 'image'):
             output.images = output.image
+        if getattr(output, 'cot_text', None): # ar pipelines return their reasoning text alongside the images
+            cot = output.cot_text[0] if isinstance(output.cot_text, list) else output.cot_text
+            p.extra_generation_params['CoT'] = cot
         if hasattr(output, 'images'):
             shared.history.add(output.images, info=processing.create_infotext(p), ops=p.ops)
         timer.process.record('pipeline')
