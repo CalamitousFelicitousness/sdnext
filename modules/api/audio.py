@@ -5,6 +5,7 @@ from modules import errors, shared
 from modules.api import helpers
 from modules.audio import metadata as audio_metadata
 from modules.audio import save as audio_save
+from modules.audio import stream as audio_stream
 from modules.audio_models import audio_load, audio_run, models_def
 from modules.audio_models.audio_error import AudioError
 from modules.paths import resolve_output_path
@@ -185,12 +186,24 @@ class APIAudio:
 
         Tags are merged from the container and the audio stream, since ogg and opus carry them on
         the stream only. The json sidecar answers for formats that store no tags at all.
+
+        Gated the way png-info is gated, on the allowed directories and on the extension. The
+        extension check is load bearing rather than cosmetic: the sidecar is found by replacing the
+        extension, so without it any path ending in anything would read the json beside it.
         """
         import os
+        from pathlib import Path
         if not file or not file.strip():
             raise HTTPException(status_code=400, detail="file path is required")
+        allowed = getattr(shared.demo, 'allowed_paths', None) or [resolve_output_path(shared.opts.outdir_samples, shared.opts.outdir_audio)]
+        if not any(Path(folder).absolute() in Path(file).absolute().parents for folder in allowed):
+            raise HTTPException(status_code=403, detail=f"file {file}: must be in one of allowed directories")
+        if os.path.splitext(file)[1].lower().lstrip('.') not in audio_save.AUDIO_FORMATS:
+            raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
         if not os.path.isfile(file):
             raise HTTPException(status_code=404, detail=f"file not found: {file}")
+        if not audio_stream.is_decodable_audio(file): # png-info loads the image for the same reason
+            raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
         info = audio_metadata.read_audio_info(file)
         sidecar = audio_metadata.read_sidecar(file)
         if info is None and sidecar is not None:

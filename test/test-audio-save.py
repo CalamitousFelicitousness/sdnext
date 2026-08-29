@@ -228,6 +228,24 @@ def test_normalize_waveform_accepts_tensors():
     assert out.dtype == np.float32
 
 
+def test_decodable_check_is_not_just_the_extension():
+    # ffmpeg picks the demuxer from the filename, so an empty file named .flac opens cleanly and
+    # reports one audio stream. Only a decoded frame tells the two apart, and the audio-info
+    # endpoint relies on this to refuse a planted file
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = os.path.join(tmp, 'empty.flac')
+        open(empty, 'wb').close()
+        junk = os.path.join(tmp, 'junk.flac')
+        with open(junk, 'wb') as f:
+            f.write(b'not audio at all' * 100)
+        real = os.path.join(tmp, 'real.flac')
+        save.write_audio(real, sine(0.5), SR, ext='flac')
+        assert stream.is_decodable_audio(real), 'real audio should decode'
+        assert not stream.is_decodable_audio(empty), 'an empty file named .flac must not pass'
+        assert not stream.is_decodable_audio(junk), 'junk bytes named .flac must not pass'
+        assert not stream.is_decodable_audio(os.path.join(tmp, 'missing.flac'))
+
+
 # ============================================================
 # Metadata helpers
 # ============================================================
@@ -354,6 +372,55 @@ def test_measure_handles_silence():
 
 
 # ============================================================
+# audio-info endpoint guard
+#
+# The endpoint reads a caller-supplied path, and its sidecar lookup replaces the extension, so
+# without these checks any path ending in an audio extension would return the json beside it.
+# ============================================================
+
+def call_audio_info(path, allowed):
+    from fastapi.exceptions import HTTPException
+    from modules import shared
+    from modules.api.audio import APIAudio
+    shared.demo = type('Demo', (), {'allowed_paths': list(allowed)})()
+    try:
+        return None, APIAudio(queue_lock=None).get_audio_info(path)
+    except HTTPException as e:
+        return e.status_code, None
+
+
+def test_audio_info_refuses_outside_allowed_dirs():
+    with tempfile.TemporaryDirectory() as tmp:
+        code, _ = call_audio_info('/etc/passwd', [tmp])
+    assert code == 403, f'expected 403, got {code}'
+
+
+def test_audio_info_refuses_unknown_extension():
+    with tempfile.TemporaryDirectory() as tmp:
+        code, _ = call_audio_info(os.path.join(tmp, 'notes.txt'), [tmp])
+    assert code == 403, f'expected 403, got {code}'
+
+
+def test_audio_info_refuses_a_planted_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, 'secret.json'), 'w', encoding='utf8') as f:
+            f.write('{"token": "must-not-leak"}')
+        open(os.path.join(tmp, 'secret.flac'), 'wb').close() # right extension, no audio in it
+        code, res = call_audio_info(os.path.join(tmp, 'secret.flac'), [tmp])
+    assert code == 403, f'expected 403, got {code}'
+    assert res is None, 'a planted file must not return a sidecar'
+
+
+def test_audio_info_reads_a_real_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        fn = os.path.join(tmp, 'take.flac')
+        save.write_audio(fn, sine(0.5), SR, ext='flac', metadata={metadata.INFO_KEY: 'Prompt: x'})
+        code, res = call_audio_info(fn, [tmp])
+    assert code is None, f'legitimate file refused with {code}'
+    assert res.get('info') == 'Prompt: x', f"info {res.get('info')!r}"
+
+
+# ============================================================
 # Runner
 # ============================================================
 
@@ -378,8 +445,18 @@ def run_all():
         test_stream_rate_snaps_only_when_needed,
         test_normalize_waveform_axis_handling,
         test_normalize_waveform_accepts_tensors,
+        test_decodable_check_is_not_just_the_extension,
     ]:
         run_test(helpers, fn)
+
+    guard = category('audio-info guard')
+    for fn in [
+        test_audio_info_refuses_outside_allowed_dirs,
+        test_audio_info_refuses_unknown_extension,
+        test_audio_info_refuses_a_planted_file,
+        test_audio_info_reads_a_real_file,
+    ]:
+        run_test(guard, fn)
 
     meta = category('metadata')
     for fn in [

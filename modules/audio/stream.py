@@ -59,6 +59,27 @@ def normalize_waveform(audio) -> np.ndarray:
     return np.ascontiguousarray(audio.astype(np.float32, copy=False))
 
 
+def is_decodable_audio(fn: str) -> bool:
+    """Whether a file really holds audio, proven by decoding a frame of it.
+
+    A stream listing is not proof: ffmpeg picks the demuxer from the filename, so opening an empty
+    file named .flac succeeds and reports one audio stream. Only a decoded frame separates real
+    audio from an extension.
+    """
+    av = get_av()
+    if av is None:
+        return False
+    try:
+        with av.open(fn) as container:
+            if not container.streams.audio:
+                return False
+            for _frame in container.decode(audio=0):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def add_audio_packets(container, audio_stream, audio: dict):
     if not audio or "frames" not in audio:
         return
