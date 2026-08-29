@@ -122,9 +122,12 @@ def save_audio(
     return fn
 
 
-def read_audio(fn: str) -> tuple[np.ndarray, int] | tuple[None, None]:
-    """Decode a file back to a float waveform and its rate, for round-trip checks and for
-    reference audio arriving as a path rather than as samples."""
+def read_audio(fn: str, rate: int | None = None, layout: str | None = None) -> tuple[np.ndarray, int] | tuple[None, None]:
+    """Decode a file back to a float waveform and its rate.
+
+    Passing rate or layout converts during the decode, which is what a model expecting 48 kHz
+    stereo needs from a file that is neither: handing it the samples unconverted is a pitch shift.
+    """
     av = get_av()
     if av is None:
         return None, None
@@ -133,8 +136,8 @@ def read_audio(fn: str) -> tuple[np.ndarray, int] | tuple[None, None]:
             if not container.streams.audio:
                 return None, None
             stream = container.streams.audio[0]
-            rate = int(stream.codec_context.sample_rate)
-            resampler = av.AudioResampler(format='fltp', layout=stream.layout.name, rate=rate)
+            rate = int(rate or stream.codec_context.sample_rate)
+            resampler = av.AudioResampler(format='fltp', layout=layout or stream.layout.name, rate=rate)
             chunks = []
             for frame in container.decode(audio=0):
                 for resampled in resampler.resample(frame):

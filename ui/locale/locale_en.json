@@ -349,7 +349,8 @@
     {"id":"","label":"Condition","localized":"","hint":"","ui":"video"},
     {"id":"","label":"Caption: Advanced Options","localized":"","hint":"Advanced configuration options for caption generation.<br>Sampling parameters, length limits, and decoding behavior for the active backend (VLM, CLiP, or Tagger).","ui":"caption"},
     {"id":"","label":"Caption: Batch","localized":"","hint":"Process multiple images in a batch using the active caption backend.<br>Captions are saved alongside the source images as .txt sidecar files when Save Caption Files is enabled.","ui":"caption"},
-    {"id":"","label":"Control elements","localized":"","hint":"Control elements are advanced models that can guide generation towards desired outcome","ui":"tab_control"}
+    {"id":"","label":"Control elements","localized":"","hint":"Control elements are advanced models that can guide generation towards desired outcome","ui":"tab_control"},
+    {"id":"","label":"Cover strength","localized":"","hint":"Blend between the source track and the prompt for <b>cover</b>. Lower values transfer more of the prompt's style; 1 keeps the source arrangement.","ui":"audio"}
   ],
   "d": [
     {"id":"","label":"Docs","localized":"","hint":""},
@@ -1276,7 +1277,9 @@
     {"id":"","label":"ReBasin","localized":"","hint":"Performs multiple merges with permutations in order to keep more features from both models","ui":"models_merge_tab"},
     {"id":"","label":"Replace VAE","localized":"","hint":"","ui":"models_merge_tab"},
     {"id":"","label":"Reference unit 1","localized":"","hint":"","ui":"control"},
-    {"id":"audio_restore","label":"Restore parameters","localized":"","hint":"Returns the controls to the values shown in the parameters box, which can also be pasted in from another take. An empty box changes nothing.","ui":"audio"}
+    {"id":"audio_restore","label":"Restore parameters","localized":"","hint":"Returns the controls to the values shown in the parameters box, which can also be pasted in from another take. An empty box changes nothing.","ui":"audio"},
+    {"id":"","label":"Repaint from","localized":"","hint":"Start of the region to regenerate, in seconds. Used by <b>repaint</b> and <b>lego</b>.","ui":"audio"},
+    {"id":"","label":"Repaint to","localized":"","hint":"End of the region to regenerate, in seconds. Use -1 to run to the end of the track.","ui":"audio"}
   ],
   "s": [
     {"id":"txt2img_sampler","label":"Sampler","localized":"","hint":"Settings related to sampler and seed selection and configuration. Samplers guide the process of turning noise into an image over multiple steps.","ui":"txt2img"},
@@ -1485,7 +1488,8 @@
     {"id":"","label":"Sparse Attention dense steps","localized":"","hint":"Number of steps at the start and end of sampling that receive a larger budget, where composition and fine detail are set. Counted at each end, and capped at half the run.<br><br>Only takes effect when <b><i>Sparse Attention dense step bonus</i></b> is above 0.<br><b>0</b> applies one budget to every step.<br>Default 0.","ui":"settings_cuda"},
     {"id":"","label":"Sparse Attention dense step bonus","localized":"","hint":"Percentage points added to the budget on the dense steps, capped at 100.<br><br>Only takes effect when <b><i>Sparse Attention dense steps</i></b> is above 0.<br>Default 30, so a budget of 30 rises to 60 on those steps.","ui":"settings_cuda"},
     {"id":"","label":"Sparse Attention share selection across heads","localized":"","hint":"Computes one selection for all attention heads rather than one per head, by averaging the heads before scoring. Cheaper to select and coarser in what it keeps, since heads that attend to different regions are served by a single compromise.<br>Worth trying when selection is itself a visible share of the cost, which happens on models with many heads.<br>Also the first thing to try when a model breaks up into bands under sparse attention: some architectures need every head to see one consistent context, and per-head selection is what breaks them.<br><br>Disabled by default.","ui":"settings_cuda"},
-    {"id":"","label":"Sparse Attention excluded models","localized":"","hint":"Models that stay dense no matter how the rest of this section is set. Comma separated, matched case insensitively against the architecture, the pipeline class and the denoiser class, so whichever of those names is to hand works as an entry.<br>The class names appear in the model load log; the architecture is the short name used elsewhere in the settings, such as <b>f1</b> or <b>anima</b>.<br><br>Listed by default is <b>CosmosTransformer3DModel</b>, the transformer Anima runs, which collapses into banded noise when each head selects its own tiles and stays degraded even with <b><i>Sparse Attention share selection across heads</i></b> enabled. The class is listed rather than the architecture because the other models built on it have not been checked.<br>A model whose output breaks up rather than merely softening belongs here.<br><br>Default <b>CosmosTransformer3DModel</b>.","ui":"settings_cuda"}
+    {"id":"","label":"Sparse Attention excluded models","localized":"","hint":"Models that stay dense no matter how the rest of this section is set. Comma separated, matched case insensitively against the architecture, the pipeline class and the denoiser class, so whichever of those names is to hand works as an entry.<br>The class names appear in the model load log; the architecture is the short name used elsewhere in the settings, such as <b>f1</b> or <b>anima</b>.<br><br>Listed by default is <b>CosmosTransformer3DModel</b>, the transformer Anima runs, which collapses into banded noise when each head selects its own tiles and stays degraded even with <b><i>Sparse Attention share selection across heads</i></b> enabled. The class is listed rather than the architecture because the other models built on it have not been checked.<br>A model whose output breaks up rather than merely softening belongs here.<br><br>Default <b>CosmosTransformer3DModel</b>.","ui":"settings_cuda"},
+    {"id":"","label":"Source track","localized":"","hint":"Track a derived task operates on. It is converted to the model's sample rate and channel layout on the way in, so a file at any rate can be used. Required by every task except <b>text2music</b>.","ui":"audio"}
   ],
   "t": [
     {"id":"txt2img_nav","label":"T2I","localized":"","hint":"Create image from text<br>Legacy interface that mimics original text-to-image interface and behavior"},
@@ -1572,7 +1576,9 @@
     {"id":"","label":"T2I-Adapter unit 3","localized":"","hint":"","ui":"control"},
     {"id":"","label":"T2I-Adapter unit 4","localized":"","hint":"","ui":"control"},
     {"id":"","label":"Tags","localized":"","hint":"Style description for the track, written as comma separated descriptors covering genre, instrumentation, mood and tempo. Words that should be sung belong in <b>Lyrics</b> rather than here.","ui":"audio"},
-    {"id":"","label":"Takes","localized":"","hint":"How many tracks are generated from a single prompt. Each take advances the seed by one, and the first two are loaded into the players.","ui":"audio"}
+    {"id":"","label":"Takes","localized":"","hint":"How many tracks are generated from a single prompt. Each take advances the seed by one, and the first two are loaded into the players.","ui":"audio"},
+    {"id":"","label":"Track","localized":"","hint":"Stem to act on, for example vocals or drums. Used by <b>extract</b>, which pulls it out of the source, and <b>lego</b>, which generates it against the rest.","ui":"audio"},
+    {"id":"","label":"Track classes","localized":"","hint":"Stems to add to the source track for <b>complete</b>, separated by spaces or commas.","ui":"audio"}
   ],
   "u": [
     {"id":"prompt_enhance_unload","label":"Unload model","localized":"","hint":"Unload currently loaded model","ui":"script_prompt_enhance"},

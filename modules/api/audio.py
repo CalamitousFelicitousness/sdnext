@@ -25,6 +25,12 @@ class ReqAudio(BaseModel):
     cfg_scale: float | None = Field(default=None, title="CFG scale", description="Guidance scale; ignored by guidance-distilled models")
     seed: int = Field(default=-1, title="Seed", description="Random seed, -1 for random. Takes past the first increment from it")
     task: str = Field(default="text2music", title="Task", description="Generation task; see the model's tasks list")
+    source_audio: str | None = Field(default=None, title="Source audio", description="Server path of the track a derived task operates on; required by every task except text2music, and converted to the model's rate and channel layout")
+    repaint_start: float | None = Field(default=None, title="Repaint start", description="Start of the region to regenerate, in seconds; repaint and lego only")
+    repaint_end: float | None = Field(default=None, title="Repaint end", description="End of the region to regenerate, in seconds, -1 for the end of the track; repaint and lego only")
+    cover_strength: float | None = Field(default=None, ge=0.0, le=1.0, title="Cover strength", description="Blend between the source and the prompt, lower transfers more style; cover only")
+    track_name: str = Field(default="", title="Track", description="Stem to act on, for example vocals or drums; extract and lego only")
+    track_classes: list[str] = Field(default=[], title="Track classes", description="Stems to add to the source; complete only")
     n_iter: int = Field(default=1, ge=1, le=16, title="Takes", description="Number of takes from one model load; each uses the next seed")
     audio_format: str | None = Field(default=None, title="Format", description="Output container: flac, opus, mp3 or wav. wav cannot store parameters")
     save: bool = Field(default=True, title="Save", description="Write the audio to the output folder")
@@ -61,11 +67,40 @@ class ItemAudioModel(BaseModel):
     duration_min: float = Field(default=0.0, title="Minimum duration", description="Shortest accepted duration")
     duration_max: float = Field(default=0.0, title="Maximum duration", description="Longest accepted duration")
     tasks: list[str] = Field(default=[], title="Tasks", description="Accepted task values")
+    task_inputs: dict = Field(default={}, title="Task inputs", description="Per task, the extra inputs it consumes: source for a source track, span for a start and end time, strength for a blend, track for a stem name, classes for a list of stems")
     lyrics: bool = Field(default=False, title="Lyrics", description="Accepts a lyrics input")
     lyrics_format: str = Field(default="", title="Lyrics format", description="tagged for [verse] and [chorus] markers, lrc for timestamped lines")
     negative: bool = Field(default=False, title="Negative", description="Accepts a negative prompt")
     reference: bool = Field(default=False, title="Reference", description="Accepts reference audio")
     loaded: bool = Field(default=False, title="Loaded", description="Currently loaded")
+
+
+def check_audio_path(file: str):
+    """Refuse an audio path outside the directories this server may read from.
+
+    The output folder is legitimate by definition and is routinely outside the paths gradio serves,
+    so it is allowed alongside them rather than instead of them. The extension check is load bearing
+    rather than cosmetic, since the sidecar is found by replacing the extension, and the decode is
+    what separates a real file from an empty one named .flac, whose demuxer ffmpeg picks by name.
+
+    Applied to a derived task's source as well as to audio-info: those tasks regenerate from their
+    source, so an unguarded path would let a request reconstruct audio it was never given.
+    """
+    import os
+    from pathlib import Path
+    if not file or not file.strip():
+        raise HTTPException(status_code=400, detail="file path is required")
+    allowed = list(getattr(shared.demo, 'allowed_paths', None) or [])
+    allowed.append(resolve_output_path(shared.opts.outdir_samples, shared.opts.outdir_audio))
+    if not any(Path(folder).absolute() in Path(file).absolute().parents for folder in allowed):
+        raise HTTPException(status_code=403, detail=f"file {file}: must be in one of allowed directories")
+    if os.path.splitext(file)[1].lower().lstrip('.') not in audio_save.AUDIO_FORMATS:
+        raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
+    if not os.path.isfile(file):
+        raise HTTPException(status_code=404, detail=f"file not found: {file}")
+    if not audio_stream.is_decodable_audio(file): # png-info loads the image for the same reason
+        raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
+    return file
 
 
 class APIAudio:
@@ -99,6 +134,12 @@ class APIAudio:
                     cfg_scale=req.cfg_scale,
                     seed=req.seed,
                     task=req.task,
+                    source_audio=check_audio_path(req.source_audio) if req.source_audio else None,
+                    repaint_start=req.repaint_start,
+                    repaint_end=req.repaint_end,
+                    cover_strength=req.cover_strength,
+                    track_name=req.track_name,
+                    track_classes=req.track_classes,
                     n_iter=req.n_iter,
                     audio_format=req.audio_format,
                     save=req.save,
@@ -157,6 +198,7 @@ class APIAudio:
                     duration_min=m.duration_min,
                     duration_max=m.duration_max,
                     tasks=list(m.tasks),
+                    task_inputs={t: list(models_def.task_of(m, t).inputs()) for t in m.tasks if models_def.task_of(m, t)},
                     lyrics=m.lyrics,
                     lyrics_format=m.lyrics_format,
                     negative=m.negative,
@@ -187,26 +229,9 @@ class APIAudio:
         Tags are merged from the container and the audio stream, since ogg and opus carry them on
         the stream only. The json sidecar answers for formats that store no tags at all.
 
-        Gated the way png-info is gated, on the allowed directories and on the extension. The
-        extension check is load bearing rather than cosmetic: the sidecar is found by replacing the
-        extension, so without it any path ending in anything would read the json beside it.
+        Gated the way png-info is gated; see check_audio_path.
         """
-        import os
-        from pathlib import Path
-        if not file or not file.strip():
-            raise HTTPException(status_code=400, detail="file path is required")
-        # the output folder is legitimate by definition and is routinely outside the paths gradio
-        # serves, so it is allowed alongside them rather than instead of them
-        allowed = list(getattr(shared.demo, 'allowed_paths', None) or [])
-        allowed.append(resolve_output_path(shared.opts.outdir_samples, shared.opts.outdir_audio))
-        if not any(Path(folder).absolute() in Path(file).absolute().parents for folder in allowed):
-            raise HTTPException(status_code=403, detail=f"file {file}: must be in one of allowed directories")
-        if os.path.splitext(file)[1].lower().lstrip('.') not in audio_save.AUDIO_FORMATS:
-            raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
-        if not os.path.isfile(file):
-            raise HTTPException(status_code=404, detail=f"file not found: {file}")
-        if not audio_stream.is_decodable_audio(file): # png-info loads the image for the same reason
-            raise HTTPException(status_code=403, detail=f"file {file}: not an audio file")
+        check_audio_path(file)
         info = audio_metadata.read_audio_info(file)
         sidecar = audio_metadata.read_sidecar(file)
         if info is None and sidecar is not None:

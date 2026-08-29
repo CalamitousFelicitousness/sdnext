@@ -39,6 +39,7 @@ class Model:
     duration_min: float = 1.0
     duration_max: float = 600.0
     tasks: tuple = ('text2music',)
+    task_spec: dict = None # name to Task; a second architecture brings its own table
     lyrics: bool = True
     lyrics_format: str = 'tagged' # tagged for [verse]/[chorus], lrc for timestamped lines
     negative: bool = False
@@ -49,11 +50,44 @@ class Model:
         return f'name="{self.name}" repo="{self.repo}" cls="{self.repo_cls}" steps={self.steps} cfg={self.cfg} distilled={self.distilled} rate={self.sample_rate} tasks={list(self.tasks)}'
 
 
-# The code-driven tasks need the audio_tokenizer and audio_token_detokenizer components, which the
-# base repo carries and the turbo repo does not, so the shorter list is a property of the weights
-# rather than a policy.
-ACE_STEP_TASKS = ('text2music', 'repaint', 'cover')
-ACE_STEP_BASE_TASKS = ACE_STEP_TASKS + ('extract', 'lego', 'complete')
+@dataclass(frozen=True)
+class Task:
+    """What a task consumes, so callers read the requirement instead of matching on the task name.
+
+    A task that needs a source track cannot run without one, which is a refusal the caller should
+    get before a model load rather than a failure inside the pipeline.
+    """
+    name: str
+    source: bool = False # operates on a track the caller supplies
+    span: bool = False # takes a start and end time within that track
+    strength: bool = False # takes a blend strength between the source and the prompt
+    track: bool = False # takes the name of one stem
+    classes: bool = False # takes a list of stem names to add
+
+    def inputs(self) -> tuple:
+        fields = ('source', 'span', 'strength', 'track', 'classes')
+        return tuple(f for f in fields if getattr(self, f))
+
+
+# Requirements read from the pipeline rather than from the model cards, which document only
+# text2music. cover is the one task gated on components: both of its conditioning paths require
+# audio_tokenizer and audio_token_detokenizer and raise without them, and the turbo repo ships
+# neither. The rest are driven by an instruction string and need only the source track, so they are
+# mechanically available wherever the pipeline is.
+ACE_STEP_TASK_SPEC = {
+    'text2music': Task('text2music'),
+    'repaint': Task('repaint', source=True, span=True),
+    'cover': Task('cover', source=True, strength=True),
+    'extract': Task('extract', source=True, track=True),
+    'lego': Task('lego', source=True, span=True, track=True),
+    'complete': Task('complete', source=True, classes=True),
+}
+
+ACE_STEP_TASKS = ('text2music', 'repaint', 'extract', 'lego', 'complete')
+ACE_STEP_BASE_TASKS = ('text2music', 'repaint', 'cover', 'extract', 'lego', 'complete')
+
+# Stems the model names in its own task instructions; free text is accepted for anything else.
+ACE_STEP_TRACKS = ('vocals', 'drums', 'bass', 'guitar', 'piano', 'strings', 'synth', 'other')
 
 models: dict[str, list[Model]] = {
     'ACE-Step': [
@@ -69,7 +103,8 @@ models: dict[str, list[Model]] = {
             sample_rate=48000,
             duration=60.0,
             duration_max=600.0,
-            tasks=ACE_STEP_TASKS,
+            tasks=ACE_STEP_TASKS, # no cover: this repo ships neither the tokenizer nor the detokenizer
+            task_spec=ACE_STEP_TASK_SPEC,
             reference=True,
         ),
         Model(
@@ -83,7 +118,8 @@ models: dict[str, list[Model]] = {
             sample_rate=48000,
             duration=60.0,
             duration_max=600.0,
-            tasks=ACE_STEP_BASE_TASKS, # stem extraction and track completion are base only
+            tasks=ACE_STEP_BASE_TASKS, # the only repo carrying the tokenizer pair, so the only one that covers
+            task_spec=ACE_STEP_TASK_SPEC,
             reference=True,
         ),
     ],
@@ -136,3 +172,15 @@ def pipeline_classes() -> set[str]:
 
 def supports(row: Model, task: str) -> bool:
     return task in (row.tasks or ())
+
+
+def task_of(row: Model, task: str) -> Task | None:
+    """What the named task consumes on this model, or None when the model does not offer it."""
+    if not supports(row, task):
+        return None
+    return (row.task_spec or {}).get(task)
+
+
+def needs_source(row: Model, task: str) -> bool:
+    spec = task_of(row, task)
+    return bool(spec and spec.source)

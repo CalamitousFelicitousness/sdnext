@@ -132,8 +132,31 @@ def describe(engine: str, name: str) -> str:
     return ' | '.join(bits)
 
 
-def generate(engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt):
-    """Gradio adapter. The core is keyword-only; this binds the tab's controls to it."""
+def task_hint(engine: str, name: str) -> str:
+    """What each of the model's tasks needs, so the requirement is readable without a failed run."""
+    row = models_def.find(name, engine)
+    if row is None:
+        return ''
+    labels = {'source': 'source track', 'span': 'time range', 'strength': 'cover strength', 'track': 'track name', 'classes': 'track classes'}
+    lines = []
+    for task in row.tasks:
+        spec = models_def.task_of(row, task)
+        needs = [labels[i] for i in spec.inputs()] if spec else []
+        lines.append(f'<b>{task}</b>: {", ".join(needs) if needs else "prompt only"}')
+    return '<span>' + ' &nbsp;|&nbsp; '.join(lines) + '</span>'
+
+
+def generate(engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt,
+             source, repaint_start, repaint_end, cover_strength, track_name, track_classes):
+    """Gradio adapter. The core is keyword-only; this binds the tab's controls to it.
+
+    The task controls are always visible, so every run would otherwise hand the core values the
+    selected task does not take and collect a log line refusing each one. The registry answers what
+    the task consumes, and only that is passed; a request arriving over the api is still checked
+    there, since it can carry anything.
+    """
+    spec = models_def.task_of(models_def.find(model, engine), task) if models_def.find(model, engine) else None
+    takes_input = spec.inputs() if spec else ()
     try:
         results = audio_run.run(
             engine=engine,
@@ -146,6 +169,12 @@ def generate(engine, model, prompt, lyrics, negative, duration, seed, takes, tas
             cfg_scale=float(cfg) if cfg else None,
             seed=int(seed),
             task=task,
+            source_audio=(source or None) if 'source' in takes_input else None,
+            repaint_start=float(repaint_start) if 'span' in takes_input else None,
+            repaint_end=float(repaint_end) if 'span' in takes_input else None,
+            cover_strength=float(cover_strength) if 'strength' in takes_input else None,
+            track_name=(track_name or '').strip() if 'track' in takes_input else '',
+            track_classes=[t.strip() for t in (track_classes or '').replace(',', ' ').split() if t.strip()] if 'classes' in takes_input else None,
             n_iter=int(takes),
             audio_format=fmt,
         )
@@ -191,6 +220,18 @@ def create_ui():
                         steps = gr.Slider(label='Steps', elem_id='audio_steps', minimum=0, maximum=200, step=1, value=0)
                         cfg = gr.Slider(label='Guidance scale', elem_id='audio_cfg', minimum=0, maximum=30, step=0.1, value=0)
                     gr.HTML(value='<span>Steps and guidance at zero use the model defaults.</span>')
+                # every task control stays visible and the model decides what applies, the same way
+                # guidance stays visible on a distilled model
+                with gr.Accordion('Source track', elem_id='audio_source_panel', open=False):
+                    source = gr.Audio(label='Source track', elem_id='audio_source', type='filepath', source='upload')
+                    task_info = gr.HTML(value=task_hint(default_engine, default_model), elem_id='audio_task_info')
+                    with gr.Row():
+                        repaint_start = gr.Number(label='Repaint from', elem_id='audio_repaint_start', value=0, precision=2)
+                        repaint_end = gr.Number(label='Repaint to', elem_id='audio_repaint_end', value=-1, precision=2)
+                    with gr.Row():
+                        cover_strength = gr.Slider(label='Cover strength', elem_id='audio_cover_strength', minimum=0, maximum=1, step=0.05, value=1.0)
+                        track_name = gr.Dropdown(label='Track', elem_id='audio_track', choices=list(models_def.ACE_STEP_TRACKS), value='vocals', allow_custom_value=True)
+                    track_classes = gr.Textbox(label='Track classes', elem_id='audio_track_classes', lines=1, placeholder='drums bass')
                 generate_btn = gr.Button('Generate', elem_id='audio_generate', variant='primary')
 
             with gr.Column(scale=2):
@@ -209,15 +250,16 @@ def create_ui():
         def on_model(engine_name, model_name):
             row = models_def.find(model_name, engine_name)
             if row is None:
-                return describe(engine_name, model_name), gr.update(), gr.update()
+                return describe(engine_name, model_name), gr.update(), gr.update(), gr.update()
             return (
                 describe(engine_name, model_name),
                 gr.update(minimum=row.duration_min, maximum=row.duration_max, value=min(max(row.duration, row.duration_min), row.duration_max)),
                 gr.update(choices=list(row.tasks), value=row.tasks[0] if row.tasks else 'text2music'),
+                task_hint(engine_name, model_name),
             )
 
         engine.change(fn=on_engine, inputs=[engine], outputs=[model, model_info])
-        model.change(fn=on_model, inputs=[engine, model], outputs=[model_info, duration, task])
+        model.change(fn=on_model, inputs=[engine, model], outputs=[model_info, duration, task, task_info])
         enhance_btn.click(fn=enhance_tags, inputs=[prompt], outputs=[prompt])
         restore_btn.click(
             fn=restore_params,
@@ -227,6 +269,7 @@ def create_ui():
         )
         generate_btn.click(
             fn=call_queue.wrap_gradio_gpu_call(generate, extra_outputs=[None, None, '', ''], name='Audio'),
-            inputs=[engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt],
+            inputs=[engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt,
+                    source, repaint_start, repaint_end, cover_strength, track_name, track_classes],
             outputs=[take_a, take_b, info, downloads],
         )

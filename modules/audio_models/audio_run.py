@@ -9,11 +9,13 @@ from it and hands back an empty result. Calling the pipeline here and building `
 directly also keeps this path out of the two files upstream touches most.
 """
 
+import os
 import time
 from dataclasses import dataclass, field
 import torch
 from modules import errors, processing, processing_class, processing_helpers, shared, timer
 from modules.audio import loudness
+from modules.audio import stream as audio_stream
 from modules.audio import metadata as audio_metadata
 from modules.audio import save as audio_save
 from modules.audio_models import audio_load, models_def
@@ -62,6 +64,63 @@ def make_callback():
     return callback
 
 
+def load_source(source, rate: int):
+    """A caller's track as a [channels, samples] tensor at the model's rate.
+
+    Accepts a path or samples. Decoding targets the model's rate and a stereo layout, because the
+    pipeline encodes this straight through the vae and a mismatched rate is heard as a pitch shift.
+    """
+    if source is None:
+        return None
+    if isinstance(source, str):
+        if not os.path.isfile(source):
+            raise AudioError(f'audio: source audio not found: {source}', 400)
+        waveform, got = audio_save.read_audio(source, rate=rate, layout='stereo')
+        if waveform is None:
+            raise AudioError(f'audio: source audio could not be decoded: {source}', 400)
+        log.debug(f'Audio source: file="{source}" rate={got} shape={tuple(waveform.shape)}')
+        source = waveform
+    tensor = source if torch.is_tensor(source) else torch.from_numpy(audio_stream.normalize_waveform(source))
+    tensor = tensor.to(torch.float32)
+    if tensor.dim() == 1:
+        tensor = tensor.unsqueeze(0)
+    if tensor.dim() != 2:
+        raise AudioError(f'audio: source audio must be [channels, samples], got {tuple(tensor.shape)}', 400)
+    return tensor
+
+
+def task_args_for(row: models_def.Model, task: str, *, source, span, strength, track, classes) -> dict:
+    """Pipeline arguments for one task, taken from what the registry says the task consumes.
+
+    Values for inputs the task does not take are reported and dropped, so a leftover control on the
+    caller's side cannot quietly steer a different task.
+    """
+    spec = models_def.task_of(row, task)
+    if spec is None:
+        raise AudioError(f'audio: task="{task}" unsupported by model="{row.name}", supported: {list(row.tasks)}', 400)
+    if spec.source and source is None:
+        raise AudioError(f'audio: task="{task}" needs a source track', 400)
+    args = {}
+    supplied = {'source': source is not None, 'span': span is not None, 'strength': strength is not None,
+                'track': bool(track), 'classes': bool(classes)}
+    ignored = [name for name, given in supplied.items() if given and not getattr(spec, name)]
+    if ignored:
+        log.info(f'Audio: task="{task}" takes no {", ".join(ignored)}, ignoring it')
+    if spec.source and source is not None:
+        args['src_audio'] = source
+    if spec.span and span is not None:
+        start, end = span
+        args['repainting_start'] = float(start)
+        args['repainting_end'] = float(end)
+    if spec.strength and strength is not None:
+        args['audio_cover_strength'] = float(strength)
+    if spec.track and track:
+        args['track_name'] = str(track)
+    if spec.classes and classes:
+        args['complete_track_classes'] = list(classes)
+    return args
+
+
 def resolve_model(engine: str | None, model: str | None) -> models_def.Model:
     row = models_def.find(model, engine) if model else models_def.default_model()
     if row is None:
@@ -81,7 +140,13 @@ def run(
     cfg_scale: float | None = None,
     seed: int = -1,
     task: str = 'text2music',
+    source_audio=None,
     reference_audio=None,
+    repaint_start: float | None = None,
+    repaint_end: float | None = None,
+    cover_strength: float | None = None,
+    track_name: str = '',
+    track_classes: list | None = None,
     audio_format: str | None = None,
     save: bool = True,
     n_iter: int = 1,
@@ -92,6 +157,9 @@ def run(
     row = resolve_model(engine, model)
     if task not in row.tasks:
         raise AudioError(f'audio: task="{task}" unsupported by model="{row.name}", supported: {list(row.tasks)}', 400)
+    source = load_source(source_audio, row.sample_rate)
+    span = None if repaint_start is None and repaint_end is None else (repaint_start or 0.0, -1.0 if repaint_end is None else repaint_end)
+    derived = task_args_for(row, task, source=source, span=span, strength=cover_strength, track=track_name, classes=track_classes)
     duration = float(duration if duration is not None else row.duration)
     if duration < row.duration_min or duration > row.duration_max:
         raise AudioError(f'audio: duration={duration} outside the model range {row.duration_min} to {row.duration_max}', 400)
@@ -127,27 +195,43 @@ def run(
     )
     processing.fix_seed(p)
 
+    pipeline_args = {**derived, **task_args} # an explicit caller override beats the derived value
     results = []
     try:
         for iteration in range(max(1, int(n_iter))):
-            results.append(generate_one(p, row, iteration, task, reference_audio, save, task_args))
+            results.append(generate_one(p, row, iteration, task, reference_audio, save, pipeline_args))
     finally:
         p.close()
     return results
 
 
-def infotext_params(p, row: models_def.Model, task: str, rate: int, levels: dict) -> dict:
+def infotext_params(p, row: models_def.Model, task: str, rate: int, levels: dict, args: dict | None = None) -> dict:
     """The audio fields the infotext carries, built without touching the pipeline so it stays checkable.
 
     Lyrics are written raw: create_infotext quotes any value holding a comma, colon or newline, so
     the section structure survives a round trip and the infotext still occupies one line.
+
+    The source track is recorded by its length rather than its path, which would carry a local
+    directory into every file the take is shared as.
     """
+    args = args or {}
     params = {
         'Audio model': row.name,
         'Audio task': task,
         'Duration': round(p.duration, 2),
         'Sample rate': rate,
     }
+    source = args.get('src_audio')
+    if source is not None:
+        params['Source duration'] = round(source.shape[-1] / rate, 2) if rate else 0
+    if args.get('repainting_start') is not None:
+        params['Repaint range'] = f"{args['repainting_start']} to {args['repainting_end']}"
+    if args.get('audio_cover_strength') is not None:
+        params['Cover strength'] = args['audio_cover_strength']
+    if args.get('track_name'):
+        params['Track'] = args['track_name']
+    if args.get('complete_track_classes'):
+        params['Track classes'] = ' '.join(args['complete_track_classes'])
     if p.lyrics:
         params['Lyrics'] = p.lyrics
     if (levels or {}).get('lufs') is not None:
@@ -204,7 +288,7 @@ def generate_one(p, row: models_def.Model, iteration: int, task: str, reference_
     rate = int(getattr(output, 'sampling_rate', None) or row.sample_rate)
     levels = loudness.measure(waveform, rate)
     p.seed = seed
-    p.extra_generation_params.update(infotext_params(p, row, task, rate, levels))
+    p.extra_generation_params.update(infotext_params(p, row, task, rate, levels, task_args))
     info = processing.create_infotext(p)
 
     path = None
