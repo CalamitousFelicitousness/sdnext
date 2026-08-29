@@ -1274,7 +1274,8 @@
     {"id":"","label":"Reuse loaded model dictionary","localized":"","hint":"","ui":"settings_legacy_options"},
     {"id":"","label":"ReBasin","localized":"","hint":"Performs multiple merges with permutations in order to keep more features from both models","ui":"models_merge_tab"},
     {"id":"","label":"Replace VAE","localized":"","hint":"","ui":"models_merge_tab"},
-    {"id":"","label":"Reference unit 1","localized":"","hint":"","ui":"control"}
+    {"id":"","label":"Reference unit 1","localized":"","hint":"","ui":"control"},
+    {"id":"audio_restore","label":"Restore parameters","localized":"","hint":"Returns the controls to the values shown in the parameters box, which can also be pasted in from another take. An empty box changes nothing.","ui":"audio"}
   ],
   "s": [
     {"id":"txt2img_sampler","label":"Sampler","localized":"","hint":"Settings related to sampler and seed selection and configuration. Samplers guide the process of turning noise into an image over multiple steps.","ui":"txt2img"},

@@ -2,7 +2,7 @@ import html
 import os
 from urllib.parse import quote
 import gradio as gr
-from modules import call_queue
+from modules import call_queue, infotext
 from modules.audio import save as audio_save
 from modules.audio_models import audio_run, models_def
 from modules.audio_models.audio_error import AudioError
@@ -28,6 +28,70 @@ def download_links(results) -> str:
 
 def model_choices(engine: str) -> list[str]:
     return models_def.model_names(engine)
+
+
+RESTORE_OUTPUTS = 11
+
+
+def as_number(params: dict, key: str, cast):
+    value = params.get(key, None)
+    if value is None:
+        return None
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def restore_params(info_text: str):
+    """Repopulate the tab from a take's parameters.
+
+    Not wired through the shared copypaste plumbing: that path coerces each value with
+    type(component.value), so it cannot repopulate the model and task dropdowns whose choices follow
+    the selected model, and it calls a per-tab javascript token recount this tab has no counter for.
+    """
+    blank = [gr.update() for _ in range(RESTORE_OUTPUTS)]
+    params = infotext.parse(info_text or '')
+    if not params:
+        return blank
+    row = models_def.find(str(params.get('Audio model') or ''))
+    engine_name = models_def.engine_of(row) if row is not None else None
+    task_name = str(params.get('Audio task') or '') or None
+    duration = as_number(params, 'Duration', float)
+    if row is not None and duration is not None:
+        duration = min(max(duration, row.duration_min), row.duration_max)
+
+    def text(key):
+        value = params.get(key, None)
+        return gr.update(value=str(value)) if value is not None else gr.update(value='')
+
+    if row is None: # an unknown model leaves the selectors alone rather than clearing them
+        log.debug(f'Audio restore: model="{params.get("Audio model")}" not in the registry, selectors left as they are')
+        engine_update, model_update, task_update, info_update = gr.update(), gr.update(), gr.update(), gr.update()
+        duration_update = gr.update(value=duration) if duration is not None else gr.update()
+    else:
+        engine_update = gr.update(value=engine_name)
+        model_update = gr.update(choices=model_choices(engine_name), value=row.name)
+        task_update = gr.update(choices=list(row.tasks), value=task_name if task_name in row.tasks else row.tasks[0])
+        info_update = describe(engine_name, row.name)
+        duration_update = gr.update(minimum=row.duration_min, maximum=row.duration_max, value=duration if duration is not None else row.duration)
+
+    seed = as_number(params, 'Seed', int)
+    steps = as_number(params, 'Steps', int)
+    cfg = as_number(params, 'CFG scale', float)
+    return [
+        engine_update,
+        model_update,
+        info_update,
+        text('Prompt'),
+        text('Lyrics'),
+        text('Negative prompt'),
+        duration_update,
+        gr.update(value=seed) if seed is not None else gr.update(),
+        task_update,
+        gr.update(value=steps) if steps is not None else gr.update(),
+        gr.update(value=cfg) if cfg is not None else gr.update(),
+    ]
 
 
 def describe(engine: str, name: str) -> str:
@@ -108,7 +172,8 @@ def create_ui():
                 take_a = gr.Audio(label='Take 1', elem_id='audio_take_a', type='filepath', interactive=False, show_download_button=False)
                 take_b = gr.Audio(label='Take 2', elem_id='audio_take_b', type='filepath', interactive=False, show_download_button=False)
                 downloads = gr.HTML(value='', elem_id='audio_downloads')
-                info = gr.Textbox(label='Parameters', elem_id='audio_info', lines=6, interactive=False)
+                info = gr.Textbox(label='Parameters', elem_id='audio_info', lines=6, interactive=True)
+                restore_btn = gr.Button('Restore parameters', elem_id='audio_restore')
 
         def on_engine(engine_name):
             choices = model_choices(engine_name)
@@ -127,6 +192,12 @@ def create_ui():
 
         engine.change(fn=on_engine, inputs=[engine], outputs=[model, model_info])
         model.change(fn=on_model, inputs=[engine, model], outputs=[model_info, duration, task])
+        restore_btn.click(
+            fn=restore_params,
+            inputs=[info],
+            outputs=[engine, model, model_info, prompt, lyrics, negative, duration, seed, task, steps, cfg],
+            show_progress='hidden',
+        )
         generate_btn.click(
             fn=call_queue.wrap_gradio_gpu_call(generate, extra_outputs=[None, None, '', ''], name='Audio'),
             inputs=[engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt],
