@@ -195,7 +195,10 @@ class APIAudio:
         from pathlib import Path
         if not file or not file.strip():
             raise HTTPException(status_code=400, detail="file path is required")
-        allowed = getattr(shared.demo, 'allowed_paths', None) or [resolve_output_path(shared.opts.outdir_samples, shared.opts.outdir_audio)]
+        # the output folder is legitimate by definition and is routinely outside the paths gradio
+        # serves, so it is allowed alongside them rather than instead of them
+        allowed = list(getattr(shared.demo, 'allowed_paths', None) or [])
+        allowed.append(resolve_output_path(shared.opts.outdir_samples, shared.opts.outdir_audio))
         if not any(Path(folder).absolute() in Path(file).absolute().parents for folder in allowed):
             raise HTTPException(status_code=403, detail=f"file {file}: must be in one of allowed directories")
         if os.path.splitext(file)[1].lower().lstrip('.') not in audio_save.AUDIO_FORMATS:

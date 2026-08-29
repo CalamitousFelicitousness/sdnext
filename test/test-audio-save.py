@@ -411,6 +411,24 @@ def test_audio_info_refuses_a_planted_file():
     assert res is None, 'a planted file must not return a sidecar'
 
 
+def test_audio_info_reads_the_output_folder_when_gradio_does_not_serve_it():
+    # the output folder is commonly outside the paths gradio serves, and a guard that refuses the
+    # files this endpoint's own generations produce is worse than no guard
+    from modules import shared
+    with tempfile.TemporaryDirectory() as tmp:
+        fn = os.path.join(tmp, 'take.flac')
+        save.write_audio(fn, sine(0.5), SR, ext='flac', metadata={metadata.INFO_KEY: 'Prompt: y'})
+        original_samples, original_audio = shared.opts.outdir_samples, shared.opts.outdir_audio
+        try:
+            shared.opts.outdir_samples = ''
+            shared.opts.outdir_audio = tmp
+            code, res = call_audio_info(fn, ['/nonexistent/gradio/root'])
+        finally:
+            shared.opts.outdir_samples, shared.opts.outdir_audio = original_samples, original_audio
+    assert code is None, f'file in the audio output folder refused with {code}'
+    assert res.get('info') == 'Prompt: y'
+
+
 def test_audio_info_reads_a_real_file():
     with tempfile.TemporaryDirectory() as tmp:
         fn = os.path.join(tmp, 'take.flac')
@@ -454,6 +472,7 @@ def run_all():
         test_audio_info_refuses_outside_allowed_dirs,
         test_audio_info_refuses_unknown_extension,
         test_audio_info_refuses_a_planted_file,
+        test_audio_info_reads_the_output_folder_when_gradio_does_not_serve_it,
         test_audio_info_reads_a_real_file,
     ]:
         run_test(guard, fn)
