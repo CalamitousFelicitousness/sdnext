@@ -8,18 +8,9 @@ import einops
 from PIL import Image
 from modules import shared, errors ,timer, rife, processing
 from modules.logger import log
+from modules.audio.stream import add_audio_packets, add_audio_tensor, get_audio_rate # pylint: disable=unused-import # shared with the audio path, re-exported for callers bound to this module
 from modules.video_models.video_utils import check_av
 from modules.video_models.video_upscale import upscale_video
-
-
-def get_audio_rate(p=None, default: int = 24000) -> int:
-    # pipeline output wins when it reports a rate, else the loaded vocoder: LTX-2.0 runs at 24k,
-    # 2.3 and 2.5 at 48k, and muxing at the wrong rate shifts the pitch
-    rate = getattr(p, 'audio_sampling_rate', None) if p is not None else None
-    if not rate:
-        vocoder = getattr(shared.sd_model, 'vocoder', None)
-        rate = getattr(getattr(vocoder, 'config', None), 'output_sampling_rate', None)
-    return int(rate) if rate else default
 
 
 def get_video_filename(p:processing.StableDiffusionProcessingVideo):
@@ -112,64 +103,6 @@ def numpy_to_tensor(images):
     # tensor = (tensor.float() / 127.5) - 1.0 # from [0,255] to [-1,1]
     # log.debug(f'Video output: images={len(images)} tensor={tensor.shape}')
     return tensor
-
-
-def add_audio_packets(container, audio_stream, audio: dict):
-    if not audio or "frames" not in audio:
-        return
-    try:
-        av = check_av()
-        sr = audio.get("sr", 44100)
-        layout = audio.get("layout", "stereo")
-        resampler = av.AudioResampler(format="fltp", layout=layout, rate=sr)
-        fifo = av.AudioFifo()
-        for raw_frame in audio.get("frames", []):
-            for resampled in resampler.resample(raw_frame):
-                fifo.write(resampled)
-        for resampled in resampler.resample(None):
-            fifo.write(resampled)
-        pts_counter = 0
-        frame_size = audio_stream.codec_context.frame_size or 1024
-        while fifo.samples >= frame_size:
-            frame = fifo.read(frame_size)
-            frame.pts = pts_counter
-            pts_counter += frame.samples
-            for packet in audio_stream.encode(frame):
-                packet.stream = audio_stream
-                container.mux_one(packet)
-        if fifo.samples > 0:
-            frame = fifo.read(fifo.samples)
-            frame.pts = pts_counter
-            pts_counter += frame.samples
-            for packet in audio_stream.encode(frame):
-                packet.stream = audio_stream
-                container.mux_one(packet)
-        for packet in audio_stream.encode():
-            packet.stream = audio_stream
-            container.mux_one(packet)
-    except Exception as e:
-        log.error(f"Video audio encoding: type=packets {e}")
-        errors.display(e, "Audio")
-
-
-def add_audio_tensor(container, audio_stream, audio: torch.Tensor, sample_rate: int):
-    av = check_av()
-    if torch.is_tensor(audio):
-        audio = audio.detach().float().cpu().numpy()
-    if audio.ndim > 2:
-        audio = np.squeeze(audio)
-    if audio.ndim == 1:
-        audio = audio[None, :]
-    elif audio.ndim == 2 and audio.shape[0] > audio.shape[1] and audio.shape[1] in (1, 2):
-        audio = audio.T
-    channels = audio.shape[0] if audio.shape[0] in (1, 2) else 1
-    layout = "stereo" if channels == 2 else "mono"
-    if audio.dtype != np.int16:
-        audio = np.clip(audio, -1.0, 1.0)
-        audio = (audio * 32767.0).astype(np.int16)
-    audio_frame = av.AudioFrame.from_ndarray(audio, format="s16p", layout=layout)
-    audio_frame.sample_rate = sample_rate
-    add_audio_packets(container, audio_stream, {"sr": sample_rate, "layout": layout, "frames": [audio_frame]})
 
 
 def parse_options(options):

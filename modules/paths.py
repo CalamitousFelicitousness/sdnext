@@ -136,6 +136,7 @@ def create_paths(opts):
         create_path(fix_path('outdir_init_images'))
         create_path(fix_path('outdir_save'))
         create_path(fix_path('outdir_video'))
+        create_path(fix_path('outdir_audio'))
     if not base_grids:
         create_path(fix_path('outdir_txt2img_grids'))
         create_path(fix_path('outdir_img2img_grids'))
@@ -153,6 +154,7 @@ def create_paths(opts):
         create_path(resolve_output_path(base_samples, opts.data.get('outdir_extras_samples', '')))
         create_path(resolve_output_path(base_samples, opts.data.get('outdir_save', '')))
         create_path(resolve_output_path(base_samples, opts.data.get('outdir_video', '')))
+        create_path(resolve_output_path(base_samples, opts.data.get('outdir_audio', '')))
         create_path(resolve_output_path(base_samples, opts.data.get('outdir_init_images', '')))
     if base_grids:
         create_path(resolve_output_path(base_grids, opts.data.get('outdir_txt2img_grids', '')))
