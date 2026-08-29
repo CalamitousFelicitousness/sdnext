@@ -391,7 +391,7 @@
     {"id":"","label":"Denoising steps","localized":"","hint":"","ui":"control"},
     {"id":"","label":"Depth map","localized":"","hint":"","ui":"control"},
     {"id":"","label":"Dynamic shift","localized":"","hint":"","ui":"video"},
-    {"id":"","label":"Duration","localized":"","hint":"","ui":"extras"},
+    {"id":"","label":"Duration","localized":"","hint":"Length of the generated output in seconds. Longer outputs take proportionally more time and memory.","ui":"extras"},
     {"id":"","label":"Device Info","localized":"","hint":"","ui":"component-8779"},
     {"id":"","label":"Diffusers load using Run:ai streamer","localized":"","hint":"","ui":"settings_sd"},
     {"id":"","label":"Disable accelerate","localized":"","hint":"","ui":"settings_sd"},
@@ -483,7 +483,8 @@
     {"id":"","label":"Enable Hypernetwork support","localized":"","hint":"","ui":"settings_legacy_options"},
     {"id":"","label":"Embedding similarity","localized":"","hint":"When words to process are present, the model will search for words with similar meaning and match them as well. Higher values make the filter more strict, requiring a closer match between words. Lower values allow more leniency. Default is disabled.","ui":"settings_legacy_options"},
     {"id":"","label":"Enable embedding similarity","localized":"","hint":"When enabled, the model will attempt to match the style and content of the input image by comparing its embeddings to those of the generated image. This can help maintain consistency in style and content across generations.","ui":"settings_legacy_options"},
-    {"id":"","label":"Enable tensorboard logging","localized":"","hint":"","ui":"settings_legacy_options"}
+    {"id":"","label":"Enable tensorboard logging","localized":"","hint":"","ui":"settings_legacy_options"},
+    {"id":"","label":"Engine","localized":"","hint":"Model family to generate with. Changing it repopulates the <b>Model</b> list with the checkpoints belonging to that family.","ui":"audio"}
   ],
   "f": [
     {"id":"","label":"Fixed","localized":"","hint":"Resize image to target resolution. Unless height and width match, you will get incorrect aspect ratio","ui":"txt2img"},
@@ -609,7 +610,8 @@
     {"id":"","label":"For image processing do exact number of steps as specified","localized":"","hint":"","ui":"settings_legacy_options"},
     {"id":"","label":"Folder with LyCORIS network(s)","localized":"","hint":"","ui":"settings_legacy_options"},
     {"id":"","label":"Fuse strength","localized":"","hint":"","ui":"models_replace_tab"},
-    {"id":"","label":"FreeInit","localized":"","hint":"","ui":"script_video"}
+    {"id":"","label":"FreeInit","localized":"","hint":"","ui":"script_video"},
+    {"id":"","label":"Format","localized":"","hint":"Container the track is written to. <b>flac</b> is lossless and stores the generation parameters in the file, <b>opus</b> and <b>mp3</b> are compressed and also store them, and <b>wav</b> is lossless but carries no tags. A json sidecar is written alongside every format, so the parameters survive either way.","ui":"audio"}
   ],
   "g": [
     {"id":"gallery_nav","label":"Gallery","localized":"","hint":"Image gallery"},
@@ -880,7 +882,8 @@
     {"id":"","label":"LoRA target filename","localized":"","hint":"","ui":"component-5851"},
     {"id":"","label":"Layer skip guidance","localized":"","hint":"","ui":"txt2img"},
     {"id":"","label":"LineArt","localized":"","hint":"","ui":"control"},
-    {"id":"","label":"Leres Depth","localized":"","hint":"","ui":"control"}
+    {"id":"","label":"Leres Depth","localized":"","hint":"","ui":"control"},
+    {"id":"","label":"Lyrics","localized":"","hint":"Words to be sung, with section tags such as <b>[verse]</b>, <b>[chorus]</b> and <b>[bridge]</b> marking the structure. The field is optional.","ui":"audio"}
   ],
   "m": [
     {"id":"","label":"Mask","localized":"","hint":"Options for the mask that marks which part of the image is changed, used for inpainting, outpainting, and control masks. The masked area is regenerated while the rest is preserved.<br><b><i>Dilate</i></b>, <b><i>Erode</i></b>, and <b><i>Blur</i></b> reshape the mask edges; <b><i>Invert mask</i></b> swaps the changed and preserved regions; <b><i>Focus mask</i></b> crops and denoises just the masked region at full resolution.<br><br>Auto-segmentation can build the mask from the image instead of drawing it by hand.<br><br>In the <b><i>Size</i></b> accordion, the separate <b>Mask</b> tab instead sets how the mask is resized to the target resolution (see <b><i>Mode mask</i></b>).","ui":"control"},
@@ -1565,7 +1568,9 @@
     {"id":"","label":"T2I-Adapter unit 1","localized":"","hint":"","ui":"control"},
     {"id":"","label":"T2I-Adapter unit 2","localized":"","hint":"","ui":"control"},
     {"id":"","label":"T2I-Adapter unit 3","localized":"","hint":"","ui":"control"},
-    {"id":"","label":"T2I-Adapter unit 4","localized":"","hint":"","ui":"control"}
+    {"id":"","label":"T2I-Adapter unit 4","localized":"","hint":"","ui":"control"},
+    {"id":"","label":"Tags","localized":"","hint":"Style description for the track, written as comma separated descriptors covering genre, instrumentation, mood and tempo. Words that should be sung belong in <b>Lyrics</b> rather than here.","ui":"audio"},
+    {"id":"","label":"Takes","localized":"","hint":"How many tracks are generated from a single prompt. Each take advances the seed by one, and the first two are loaded into the players.","ui":"audio"}
   ],
   "u": [
     {"id":"prompt_enhance_unload","label":"Unload model","localized":"","hint":"Unload currently loaded model","ui":"script_prompt_enhance"},
