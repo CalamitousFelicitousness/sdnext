@@ -119,13 +119,16 @@ def set_group_resident(module) -> bool:
     return changed
 
 
+ENTRY_POINTS = ('decode', 'encode', 'tokenize', 'detokenize') # public entry points that are not forward
+
+
 def group_offload_role(module_name: str, module) -> str:
     """Placement role for one component: resident to stay put, ondemand for whole-module onload, main for per-step denoisers, aux for the rest."""
     if offload_excluded(module_name, module):
         return 'resident'
     if has_entry_bridge(module):
-        return 'ondemand' # encode and decode bypass the forward that group hooks scope to
-    if callable(getattr(module, 'encode', None)) or callable(getattr(module, 'decode', None)):
+        return 'ondemand' # these entry points bypass the forward that group hooks scope to
+    if any(callable(getattr(module, name, None)) for name in ENTRY_POINTS):
         s.debug_move(f'Offload: type=group module={module_name} cls={module.__class__.__name__} bridge=missing role=resident') # decorate the entry points with apply_forward_hook to make the component offloadable
         return 'resident' # nothing fires an onload for an undecorated entry point, so any hook placement strands the weights on cpu
     if not getattr(module, '_supports_group_offloading', True):
@@ -137,8 +140,8 @@ def group_offload_role(module_name: str, module) -> str:
 
 def has_entry_bridge(module) -> bool:
     """Entry points decorated with diffusers' apply_forward_hook fire _hf_hook.pre_forward,
-    which is what carries the on-demand onload for encode and decode calls that bypass forward."""
-    for name in ('decode', 'encode'):
+    which is what carries the on-demand onload for calls that bypass forward."""
+    for name in ENTRY_POINTS:
         fn = getattr(module, name, None)
         if fn is not None and getattr(fn, '__qualname__', '').startswith('apply_forward_hook'):
             return True
