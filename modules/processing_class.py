@@ -696,6 +696,7 @@ class StableDiffusionProcessingVideo(StableDiffusionProcessing):
         debug(f'Process init: mode={self.__class__.__name__} kwargs={kwargs}') # pylint: disable=protected-access
         super().__init__(**kwargs)
 
+
 class StableDiffusionProcessingAudio(StableDiffusionProcessing):
     def __init__(self, **kwargs):
         self.lyrics: str = kwargs.pop('lyrics', '')
