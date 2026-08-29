@@ -23,6 +23,7 @@ Usage:
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -46,6 +47,7 @@ modules.cmd_args.parsed, _ = modules.cmd_args.parser.parse_known_args([])
 
 from modules.errors import log                                    # pylint: disable=wrong-import-position
 from modules.audio import loudness, metadata, save, stream        # pylint: disable=wrong-import-position
+from modules.infotext import quote, unquote, re_param             # pylint: disable=wrong-import-position
 
 
 # ============================================================
@@ -273,6 +275,42 @@ def test_sidecar_round_trip():
     assert data.get('levels', {}).get('lufs') == -14.0
 
 
+LYRICS = '[verse]\nWalking down the street, thinking of you\nRain on my coat, a colon: here\n[chorus]\nOh, oh, oh'
+
+
+def infotext_round_trip(value):
+    """Build a one-line infotext holding value and parse it back the way a reader does."""
+    line = f'Steps: 8, Seed: 42, Lyrics: {quote(value)}, Sample rate: 48000'
+    parsed = {k.strip(): unquote(v.strip()) for k, v in re_param.findall(line)}
+    return line, parsed
+
+
+def test_lyrics_survive_the_infotext_round_trip():
+    line, parsed = infotext_round_trip(LYRICS)
+    assert '\n' not in line, 'infotext must stay on one line'
+    assert set(parsed) == {'Steps', 'Seed', 'Lyrics', 'Sample rate'}, f'neighbouring keys lost: {list(parsed)}'
+    assert parsed['Lyrics'] == LYRICS, f'lyrics not preserved: {parsed["Lyrics"]!r}'
+
+
+def test_flattening_newlines_would_lose_the_structure():
+    """The lossy alternative, kept as the contrast that gives the test above its meaning."""
+    _line, parsed = infotext_round_trip(LYRICS.replace('\n', ' / '))
+    assert parsed['Lyrics'] != LYRICS, 'flattened lyrics unexpectedly matched the original'
+    assert '\n' not in parsed['Lyrics'], 'flattened lyrics should carry no newlines'
+
+
+def test_the_writer_hands_over_lyrics_unflattened():
+    """Pins the writer itself, so reinstating a flattening step fails here rather than silently."""
+    from modules.audio_models import audio_run, models_def  # pylint: disable=import-outside-toplevel
+    row = models_def.default_model()
+    p = SimpleNamespace(duration=60.0, lyrics=LYRICS)
+    params = audio_run.infotext_params(p, row, 'text2music', 48000, {'lufs': -11.0})
+    assert params['Lyrics'] == LYRICS, f'writer altered the lyrics: {params["Lyrics"]!r}'
+    _line, parsed = infotext_round_trip(params['Lyrics'])
+    assert parsed['Lyrics'] == LYRICS, 'writer output did not survive the round trip'
+    assert params['Audio task'] == 'text2music' and params['Sample rate'] == 48000
+
+
 def test_reading_a_missing_file_is_quiet():
     assert metadata.read_audio_info('/nonexistent/nope.flac') is None
     assert metadata.read_audio_metadata('/nonexistent/nope.flac') == {}
@@ -481,6 +519,9 @@ def run_all():
     for fn in [
         test_retag_keeps_audio_identical,
         test_sidecar_round_trip,
+        test_lyrics_survive_the_infotext_round_trip,
+        test_flattening_newlines_would_lose_the_structure,
+        test_the_writer_hands_over_lyrics_unflattened,
         test_reading_a_missing_file_is_quiet,
         test_save_audio_writes_audio_and_sidecar,
         test_save_audio_falls_back_to_flac,

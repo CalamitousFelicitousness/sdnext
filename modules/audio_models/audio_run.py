@@ -136,6 +136,25 @@ def run(
     return results
 
 
+def infotext_params(p, row: models_def.Model, task: str, rate: int, levels: dict) -> dict:
+    """The audio fields the infotext carries, built without touching the pipeline so it stays checkable.
+
+    Lyrics are written raw: create_infotext quotes any value holding a comma, colon or newline, so
+    the section structure survives a round trip and the infotext still occupies one line.
+    """
+    params = {
+        'Audio model': row.name,
+        'Audio task': task,
+        'Duration': round(p.duration, 2),
+        'Sample rate': rate,
+    }
+    if p.lyrics:
+        params['Lyrics'] = p.lyrics
+    if (levels or {}).get('lufs') is not None:
+        params['Loudness'] = levels['lufs']
+    return params
+
+
 def generate_one(p, row: models_def.Model, iteration: int, task: str, reference_audio, save: bool, task_args: dict) -> AudioResult:
     seed = int(p.seed) + iteration
     p.seeds = [seed]
@@ -185,14 +204,7 @@ def generate_one(p, row: models_def.Model, iteration: int, task: str, reference_
     rate = int(getattr(output, 'sampling_rate', None) or row.sample_rate)
     levels = loudness.measure(waveform, rate)
     p.seed = seed
-    p.extra_generation_params['Audio model'] = row.name
-    p.extra_generation_params['Audio task'] = task
-    p.extra_generation_params['Duration'] = round(p.duration, 2)
-    p.extra_generation_params['Sample rate'] = rate
-    if p.lyrics:
-        p.extra_generation_params['Lyrics'] = p.lyrics.replace('\n', ' / ')
-    if levels.get('lufs') is not None:
-        p.extra_generation_params['Loudness'] = levels['lufs']
+    p.extra_generation_params.update(infotext_params(p, row, task, rate, levels))
     info = processing.create_infotext(p)
 
     path = None
