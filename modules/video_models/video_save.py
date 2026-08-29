@@ -8,7 +8,7 @@ import einops
 from PIL import Image
 from modules import shared, errors ,timer, rife, processing
 from modules.logger import log
-from modules.audio.stream import add_audio_packets, add_audio_tensor, get_audio_rate # pylint: disable=unused-import # shared with the audio path, re-exported for callers bound to this module
+from modules.audio.stream import add_audio_packets, add_audio_tensor, get_audio_rate, layout_name, waveform_channels # pylint: disable=unused-import # shared with the audio path, re-exported for callers bound to this module
 from modules.video_models.video_utils import check_av
 from modules.video_models.video_upscale import upscale_video
 
@@ -164,7 +164,9 @@ def atomic_save_video(
         has_audio = (audio is not None) and ((torch.is_tensor(audio) or isinstance(audio, np.ndarray)) or (isinstance(audio, dict) and len(audio.get('frames', [])) > 0))
         if has_audio:
             sr = sample_rate if not isinstance(audio, dict) else audio.get("sr", sample_rate)
-            layout = "stereo" if not isinstance(audio, dict) else audio.get("layout", "stereo")
+            # the stream layout has to match the waveform: declaring stereo for mono audio makes
+            # ffmpeg upmix it, and its power compensation costs 3 dB
+            layout = audio.get("layout", "stereo") if isinstance(audio, dict) else layout_name(waveform_channels(audio))
             audio_stream = container.add_stream("aac", rate=sr)
             audio_stream.layout = layout
             audio_stream.time_base = Fraction(1, sr)

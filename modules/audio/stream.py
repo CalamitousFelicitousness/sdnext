@@ -118,18 +118,21 @@ def add_audio_packets(container, audio_stream, audio: dict):
         errors.display(e, "Audio")
 
 
+def waveform_channels(audio) -> int:
+    """Channel count the encoder will be handed, after the normalization the writer applies.
+
+    The stream has to be declared with this layout: declaring stereo for a mono waveform makes
+    ffmpeg upmix it, and its power compensation drops the level by 3 dB.
+    """
+    samples = normalize_waveform(audio)
+    return samples.shape[0] if samples.shape[0] in (1, 2) else 1
+
+
 def add_audio_tensor(container, audio_stream, audio: torch.Tensor, sample_rate: int, target_rate: int | None = None):
     """Encode a waveform into an open container. `target_rate` resamples on the way in, for
     encoders that reject the source rate."""
     av = get_av()
-    if torch.is_tensor(audio):
-        audio = audio.detach().float().cpu().numpy()
-    if audio.ndim > 2:
-        audio = np.squeeze(audio)
-    if audio.ndim == 1:
-        audio = audio[None, :]
-    elif audio.ndim == 2 and audio.shape[0] > audio.shape[1] and audio.shape[1] in (1, 2):
-        audio = audio.T
+    audio = normalize_waveform(audio)
     channels = audio.shape[0] if audio.shape[0] in (1, 2) else 1
     layout = layout_name(channels)
     if audio.dtype != np.int16:
