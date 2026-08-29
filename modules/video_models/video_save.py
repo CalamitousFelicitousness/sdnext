@@ -152,8 +152,8 @@ def add_audio_packets(container, audio_stream, audio: dict):
         errors.display(e, "Audio")
 
 
-def add_audio_tensor(container, audio_stream, audio: torch.Tensor, sample_rate: int):
-    av = check_av()
+def normalize_audio(audio) -> np.ndarray:
+    """Waveform as [channels, samples], from a tensor or an array in either axis order."""
     if torch.is_tensor(audio):
         audio = audio.detach().float().cpu().numpy()
     if audio.ndim > 2:
@@ -162,12 +162,30 @@ def add_audio_tensor(container, audio_stream, audio: torch.Tensor, sample_rate: 
         audio = audio[None, :]
     elif audio.ndim == 2 and audio.shape[0] > audio.shape[1] and audio.shape[1] in (1, 2):
         audio = audio.T
-    channels = audio.shape[0] if audio.shape[0] in (1, 2) else 1
-    layout = "stereo" if channels == 2 else "mono"
+    return audio
+
+
+def audio_channels(audio) -> int:
+    channels = normalize_audio(audio).shape[0]
+    return channels if channels in (1, 2) else 1
+
+
+def audio_layout(audio) -> str:
+    """Layout the encoder will be handed. The stream has to be declared with this one: declaring
+    stereo for a mono waveform makes ffmpeg upmix it, and its power compensation costs 3 dB."""
+    return "stereo" if audio_channels(audio) == 2 else "mono"
+
+
+def add_audio_tensor(container, audio_stream, audio: torch.Tensor, sample_rate: int):
+    av = check_av()
+    audio = normalize_audio(audio)
+    layout = audio_layout(audio)
     if audio.dtype != np.int16:
         audio = np.clip(audio, -1.0, 1.0)
         audio = (audio * 32767.0).astype(np.int16)
-    audio_frame = av.AudioFrame.from_ndarray(audio, format="s16p", layout=layout)
+    # transposing a samples-first waveform leaves an F-ordered array, and numpy's ufuncs keep that
+    # order through the clip and the cast, so the frame builder would reject it
+    audio_frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(audio), format="s16p", layout=layout)
     audio_frame.sample_rate = sample_rate
     add_audio_packets(container, audio_stream, {"sr": sample_rate, "layout": layout, "frames": [audio_frame]})
 
@@ -231,7 +249,9 @@ def atomic_save_video(
         has_audio = (audio is not None) and ((torch.is_tensor(audio) or isinstance(audio, np.ndarray)) or (isinstance(audio, dict) and len(audio.get('frames', [])) > 0))
         if has_audio:
             sr = sample_rate if not isinstance(audio, dict) else audio.get("sr", sample_rate)
-            layout = "stereo" if not isinstance(audio, dict) else audio.get("layout", "stereo")
+            # the stream layout has to match the waveform: declaring stereo for mono audio makes
+            # ffmpeg upmix it, and its power compensation costs 3 dB
+            layout = audio.get("layout", "stereo") if isinstance(audio, dict) else audio_layout(audio)
             audio_stream = container.add_stream("aac", rate=sr)
             audio_stream.layout = layout
             audio_stream.time_base = Fraction(1, sr)
