@@ -696,6 +696,23 @@ class StableDiffusionProcessingVideo(StableDiffusionProcessing):
         debug(f'Process init: mode={self.__class__.__name__} kwargs={kwargs}') # pylint: disable=protected-access
         super().__init__(**kwargs)
 
+class StableDiffusionProcessingAudio(StableDiffusionProcessing):
+    def __init__(self, **kwargs):
+        self.lyrics: str = kwargs.pop('lyrics', '')
+        self.duration: float = kwargs.pop('duration', 60.0)
+        self.audio_engine: str = kwargs.pop('audio_engine', None)
+        self.audio_model: str = kwargs.pop('audio_model', None)
+        self.audio_task: str = kwargs.pop('audio_task', 'text2music')
+        self.audio_format: str = kwargs.pop('audio_format', 'flac')
+        self.audio_sampling_rate: int = kwargs.pop('audio_sampling_rate', None)
+        # width and height are unused by audio but read unguarded by FilenameGenerator and the
+        # infotext builder, so they carry zeroes rather than being absent
+        kwargs.setdefault('width', 0)
+        kwargs.setdefault('height', 0)
+        debug(f'Process init: mode={self.__class__.__name__} kwargs={kwargs}') # pylint: disable=protected-access
+        super().__init__(**kwargs)
+
+
 class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
     def __init__(self, **kwargs):
         debug(f'Process init: mode={self.__class__.__name__} kwargs={kwargs}') # pylint: disable=protected-access

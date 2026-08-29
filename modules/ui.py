@@ -109,6 +109,13 @@ def create_ui(startup_timer = None) -> gr.Blocks:
             timer.startup.record("ui-video")
             interfaces += [(video_interface, "Video", "video")]
 
+    if 'audio' not in ui_disabled:
+        with gr.Blocks(analytics_enabled=False) as audio_interface:
+            from modules import ui_audio
+            ui_audio.create_ui()
+            timer.startup.record("ui-audio")
+            interfaces += [(audio_interface, "Audio", "audio")]
+
     if 'extras' not in ui_disabled:
         with gr.Blocks(analytics_enabled=False) as extras_interface:
             from modules import ui_postprocessing
