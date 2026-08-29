@@ -484,7 +484,8 @@
     {"id":"","label":"Embedding similarity","localized":"","hint":"When words to process are present, the model will search for words with similar meaning and match them as well. Higher values make the filter more strict, requiring a closer match between words. Lower values allow more leniency. Default is disabled.","ui":"settings_legacy_options"},
     {"id":"","label":"Enable embedding similarity","localized":"","hint":"When enabled, the model will attempt to match the style and content of the input image by comparing its embeddings to those of the generated image. This can help maintain consistency in style and content across generations.","ui":"settings_legacy_options"},
     {"id":"","label":"Enable tensorboard logging","localized":"","hint":"","ui":"settings_legacy_options"},
-    {"id":"","label":"Engine","localized":"","hint":"Model family to generate with. Changing it repopulates the <b>Model</b> list with the checkpoints belonging to that family.","ui":"audio"}
+    {"id":"","label":"Engine","localized":"","hint":"Model family to generate with. Changing it repopulates the <b>Model</b> list with the checkpoints belonging to that family.","ui":"audio"},
+    {"id":"audio_enhance","label":"Enhance tags","localized":"","hint":"Rewrites the style prompt through the language model, asking it for music descriptors rather than image ones. Lyrics are left untouched.","ui":"audio"}
   ],
   "f": [
     {"id":"","label":"Fixed","localized":"","hint":"Resize image to target resolution. Unless height and width match, you will get incorrect aspect ratio","ui":"txt2img"},

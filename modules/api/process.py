@@ -251,7 +251,8 @@ class APIProcess:
             process_words=req.process_words,
             semantic_threshold=req.semantic_threshold,
             embedding_similarity=req.embedding_similarity,
-            use_openai=req.use_openai
+            use_openai=req.use_openai,
+            module=req.type, # the request says what the prompt is for; the script instance is always the control tab's
         )
         res = models.ResPromptEnhance(prompt=prompt, seed=seed)
         return res

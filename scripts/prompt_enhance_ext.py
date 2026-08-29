@@ -321,6 +321,7 @@ class PromptEnhanceScript(scripts_manager.Script):
                 semantic_threshold:float=0.0,
                 embedding_similarity:float=0.0,
                 use_openai:bool=False,
+                module:str | None=None, # what the enhanced prompt is for; defaults to the tab this instance was built on
                ):
         # Strip symbols from model name if present
         model = get_model_repo_from_display(model) if model else self.options.default
@@ -397,7 +398,7 @@ class PromptEnhanceScript(scripts_manager.Script):
             model=model,
             nsfw=nsfw,
             has_processor=self.processor is not None,
-            module=self.parent,
+            module=module or self.parent,
         )
 
         # Prepare prefill (VQA approach: string concatenation, not assistant message)

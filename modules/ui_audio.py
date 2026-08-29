@@ -33,6 +33,31 @@ def model_choices(engine: str) -> list[str]:
 RESTORE_OUTPUTS = 11
 
 
+def enhance_tags(prompt_text: str):
+    """Rewrite the style prompt through the shared enhancer, asking it for music instructions.
+
+    The enhancer is a script bound to a tab it was built on, and audio runs no script runner, so the
+    module is passed explicitly rather than inherited.
+    """
+    if not (prompt_text or '').strip():
+        return gr.update()
+    try:
+        from modules.scripts_manager import scripts_control
+        loaded = getattr(scripts_control, 'scripts', None) or [] # the runner is absent until the server builds its ui
+        instance = next((s for s in loaded if 'prompt_enhance_ext.py' in s.filename), None)
+        if instance is None:
+            log.warning('Audio enhance: prompt enhance script is not loaded')
+            return gr.update()
+        enhanced = instance.enhance(prompt=prompt_text, module='audio')
+    except Exception as e:
+        log.error(f'Audio enhance: {e}')
+        return gr.update()
+    if not enhanced or not str(enhanced).strip():
+        log.warning('Audio enhance: enhancer returned nothing, prompt left as it was')
+        return gr.update()
+    return gr.update(value=str(enhanced).strip())
+
+
 def as_number(params: dict, key: str, cast):
     value = params.get(key, None)
     if value is None:
@@ -146,6 +171,7 @@ def create_ui():
                 # both prompt boxes stay visible: every music model splits style from lyrics, and a
                 # model without lyrics simply leaves the second box empty
                 prompt = gr.Textbox(label='Tags', elem_id='audio_prompt', lines=2, placeholder='genre, instrumentation, mood, tempo')
+                enhance_btn = gr.Button('Enhance tags', elem_id='audio_enhance', size='sm')
                 lyrics = gr.Textbox(label='Lyrics', elem_id='audio_lyrics', lines=8, placeholder='[verse]\n...\n[chorus]\n...')
                 negative = gr.Textbox(label='Negative prompt', elem_id='audio_negative', lines=1)
                 with gr.Row():
@@ -192,6 +218,7 @@ def create_ui():
 
         engine.change(fn=on_engine, inputs=[engine], outputs=[model, model_info])
         model.change(fn=on_model, inputs=[engine, model], outputs=[model_info, duration, task])
+        enhance_btn.click(fn=enhance_tags, inputs=[prompt], outputs=[prompt])
         restore_btn.click(
             fn=restore_params,
             inputs=[info],

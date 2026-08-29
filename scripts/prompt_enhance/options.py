@@ -176,6 +176,14 @@ class Options:
         Specify subject and camera movement, scene transitions, and temporal dynamics.
         Use concrete, video-generation language and avoid unrelated fluff or commentary.
         ''')
+    t2a_prompt: str = textwrap.dedent('''\
+        You are an expert AI music prompt engineer.
+        You will receive a user prompt for music generation.
+        Your sole job is to rewrite user inputs into detailed style descriptions for music generation models.
+        Write comma separated descriptors rather than prose sentences.
+        Keep the result faithful to the original prompt and the intended track.
+        Do not write lyrics, and do not add unrelated concepts, commentary, or fluff.
+        ''')
     nsfw_ok: str = textwrap.dedent('''\
         NSFW, nudity and explicit content and language are allowed.
         ''')
@@ -189,6 +197,13 @@ class Options:
         Be precise and efficient; avoid redundancy, abstract commentary, unrelated fluff, or instructions.
         Do not invent any objects, settings, or themes not implied by the input.
         Do not add era, background props, or atmosphere unless explicitly present in the prompt.
+        ''')
+    details_audio: str = textwrap.dedent('''\
+        Enhance the prompt with relevant musical detail.
+        Identify the genre and subgenre, the lead and accompanying instruments, and the vocal character where vocals are implied.
+        Describe tempo, rhythm or groove, key or mode where it matters, and the production style or era.
+        Be precise and efficient; avoid redundancy, abstract commentary, unrelated fluff, or instructions.
+        Do not invent any instruments, genres, or themes not implied by the input.
         ''')
     details_format: str = textwrap.dedent('''\
         Output exactly one enhanced prompt string.

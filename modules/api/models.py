@@ -351,7 +351,7 @@ class ResProcess(BaseModel):
 
 class ReqPromptEnhance(BaseModel):
     prompt: str = Field(title="Prompt", description="Prompt to enhance")
-    type: str = Field(title="Type", default='text', description="Type of enhancement: text, image, video")
+    type: str = Field(title="Type", default='text', description="What the prompt is for: text, image, video or audio; selects the instructions the enhancer is given")
     model: str | None = Field(title="Model", default=None, description="Model to use for enhancement")
     system_prompt: str | None = Field(title="System prompt", default=None, description="Model system prompt")
     image: str | None = Field(title="Image", default=None, description="Image to work on, must be a Base64 string containing the image's data.")
