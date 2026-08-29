@@ -89,6 +89,14 @@ ACE_STEP_BASE_TASKS = ('text2music', 'repaint', 'cover', 'extract', 'lego', 'com
 # Stems the model names in its own task instructions; free text is accepted for anything else.
 ACE_STEP_TRACKS = ('vocals', 'drums', 'bass', 'guitar', 'piano', 'strings', 'synth', 'other')
 
+# Both repos ship the same Qwen3-Embedding-0.6B text encoder, byte identical by hash and 1.19 GB
+# each, and the hub caches blobs per repo. Every row loads the one in the base repo, which is the
+# checkpoint the others derive from: diffusers drops an explicitly passed component from its
+# download patterns, so the copy in the other repo is never fetched rather than fetched and then
+# deduplicated. The condition encoder differs between the two and is not shared.
+ACE_STEP_TE = 'ACE-Step/acestep-v15-xl-base-diffusers'
+ACE_STEP_TE_CLS = 'Qwen3Model' # the class model_index.json names
+
 models: dict[str, list[Model]] = {
     'ACE-Step': [
         Model(
@@ -97,6 +105,8 @@ models: dict[str, list[Model]] = {
             url='https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers',
             repo_cls='AceStepPipeline',
             dit_cls='AceStepTransformer1DModel',
+            te=ACE_STEP_TE,
+            te_cls=ACE_STEP_TE_CLS,
             steps=8,
             cfg=1.0,
             distilled=True, # the pipeline warns and ignores any other guidance value
@@ -113,6 +123,8 @@ models: dict[str, list[Model]] = {
             url='https://huggingface.co/ACE-Step/acestep-v15-xl-base-diffusers',
             repo_cls='AceStepPipeline',
             dit_cls='AceStepTransformer1DModel',
+            te=ACE_STEP_TE,
+            te_cls=ACE_STEP_TE_CLS,
             steps=50,
             cfg=6.0,
             sample_rate=48000,

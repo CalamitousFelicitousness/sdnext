@@ -84,12 +84,26 @@ def load_model(selected: models_def.Model) -> str:
         kwargs = {}
         sd_models.hf_auth_check(selected.repo)
         if te_cls is not None:
-            kwargs['text_encoder'] = generic.load_text_encoder(
+            if model_quant.check_quant('TE'):
+                # the setting is honored rather than gated, and the cost is stated: measured on
+                # ACE-Step turbo at one seed, quantizing this encoder to uint4 took output rms from
+                # 0.2375 to 0.1411, and a Qwen3 encoder under sdnq has produced NaN embeddings on
+                # another architecture
+                log.warning(f'Load audio: text encoder is quantized to {shared.opts.sdnq_quantize_weights_mode}, which degrades this model; untick TE in quantization settings to keep it at full precision')
+            # allow_shared is off deliberately. The shared text encoder registry matches on the
+            # model class, and its Qwen3Model entry carries no identifier, so it captures any
+            # Qwen3 encoder from any repo: it swapped this one for Anima's and generation carried
+            # on with the wrong weights at roughly half the output level.
+            text_encoder = generic.load_text_encoder(
                 selected.te or selected.repo,
                 cls_name=te_cls,
                 subfolder=selected.te_folder,
                 revision=selected.te_revision or selected.repo_revision,
+                allow_shared=False,
             )
+            if text_encoder is None:
+                raise AudioError(f'audio: text encoder failed to load from "{selected.te or selected.repo}"', 500)
+            kwargs['text_encoder'] = text_encoder
         if dit_cls is not None:
             kwargs['transformer'] = generic.load_transformer(
                 selected.dit or selected.repo,
