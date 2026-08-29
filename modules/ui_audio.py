@@ -1,9 +1,29 @@
+import html
+import os
+from urllib.parse import quote
 import gradio as gr
 from modules import call_queue
 from modules.audio import save as audio_save
 from modules.audio_models import audio_run, models_def
 from modules.audio_models.audio_error import AudioError
 from modules.logger import log
+
+
+def download_links(results) -> str:
+    """Download anchors pointing at the audio file route.
+
+    The player's own download button names the file after gradio's temp copy, whose path is
+    flattened into the filename, so saving a take yields _tmp_gradio_<hash>_<name>. The file route
+    answers with a content disposition carrying the real name.
+    """
+    rows = []
+    for index, result in enumerate(results or [], start=1):
+        if not result.path:
+            continue
+        name = html.escape(os.path.basename(result.path), quote=True)
+        url = f'/sdapi/v1/audio/file?file={quote(result.path)}'
+        rows.append(f'<a class="audio-download" href="{url}" download="{name}">Take {index}: {name}</a>')
+    return '<div class="audio-downloads">' + '<br>'.join(rows) + '</div>' if rows else ''
 
 
 def model_choices(engine: str) -> list[str]:
@@ -42,11 +62,11 @@ def generate(engine, model, prompt, lyrics, negative, duration, seed, takes, tas
         )
     except AudioError as e:
         log.error(f'Audio: {e.msg}')
-        return None, None, f'Error: {e.msg}'
+        return None, None, f'Error: {e.msg}', ''
     first = results[0].path if results else None
     second = results[1].path if len(results) > 1 else None
     info = results[0].info if results else ''
-    return first, second, info
+    return first, second, info, download_links(results)
 
 
 def create_ui():
@@ -85,8 +105,9 @@ def create_ui():
 
             with gr.Column(scale=2):
                 # audio has no thumbnail, so comparing takes means hearing both: each stays loaded
-                take_a = gr.Audio(label='Take 1', elem_id='audio_take_a', type='filepath', interactive=False)
-                take_b = gr.Audio(label='Take 2', elem_id='audio_take_b', type='filepath', interactive=False)
+                take_a = gr.Audio(label='Take 1', elem_id='audio_take_a', type='filepath', interactive=False, show_download_button=False)
+                take_b = gr.Audio(label='Take 2', elem_id='audio_take_b', type='filepath', interactive=False, show_download_button=False)
+                downloads = gr.HTML(value='', elem_id='audio_downloads')
                 info = gr.Textbox(label='Parameters', elem_id='audio_info', lines=6, interactive=False)
 
         def on_engine(engine_name):
@@ -107,7 +128,7 @@ def create_ui():
         engine.change(fn=on_engine, inputs=[engine], outputs=[model, model_info])
         model.change(fn=on_model, inputs=[engine, model], outputs=[model_info, duration, task])
         generate_btn.click(
-            fn=call_queue.wrap_gradio_gpu_call(generate, extra_outputs=[None, None, ''], name='Audio'),
+            fn=call_queue.wrap_gradio_gpu_call(generate, extra_outputs=[None, None, '', ''], name='Audio'),
             inputs=[engine, model, prompt, lyrics, negative, duration, seed, takes, task, steps, cfg, fmt],
-            outputs=[take_a, take_b, info],
+            outputs=[take_a, take_b, info, downloads],
         )
