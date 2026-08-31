@@ -174,6 +174,7 @@ def create_settings(cmd_opts):
         "sdnq_quantize_matmul_mode": OptionInfo("disabled", "Quantized MatMul type", gr.Dropdown, {"choices": sdnq_matmul_modes}),
         "sdnq_quantize_weights_mode_te": OptionInfo("Same as model", "Quantization type for Text Encoders", gr.Dropdown, {"choices": ['Same as model'] + sdnq_quant_modes}),
         "sdnq_quantize_matmul_mode_te": OptionInfo("disabled", "Quantized MatMul type for Text Encoders", gr.Dropdown, {"choices": ['Same as model'] + sdnq_matmul_modes}),
+        "sdnq_quantize_min_size": OptionInfo(0, "Minimum component size to quantize", gr.Slider, {"minimum": 0, "maximum": 32, "step": 0.5}),
         "sdnq_modules_to_not_convert": OptionInfo("", "Modules to not convert"),
         "sdnq_modules_dtype_dict": OptionInfo("{}", "Modules dtype dict"),
         "sdnq_group_size": OptionInfo(0, "Group size", gr.Slider, {"minimum": -2, "maximum": 4096, "step": 1}),

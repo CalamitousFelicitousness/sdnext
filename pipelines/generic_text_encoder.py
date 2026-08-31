@@ -111,7 +111,31 @@ def load_text_encoder(
         modules_dtype_dict = {}
     jobid = shared.state.begin('Load TE')
     try:
-        load_args, quant_args = model_quant.get_dit_args(load_config, module='TE', device_map=True, allow_quant=allow_quant, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
+        # the size gate measures the source the load will actually use: the override file or repo
+        # when one is selected, the shared-map target otherwise
+        shared_resolution = None
+        allow_sdnq = True
+        if allow_quant and model_quant.min_size_active('TE'):
+            override = shared.opts.sd_text_encoder if (shared.opts.sd_text_encoder is not None and shared.opts.sd_text_encoder != 'Default') else None
+            if override is not None:
+                from modules import model_te
+                override_path = model_te.te_dict.get(override, None)
+                if override_path is not None and os.path.exists(override_path):
+                    allow_sdnq = not model_quant.skip_small_file(override_path, module='TE', cls_name=cls_name.__name__)
+                else: # a repo override loads through AutoModel, so the estimate resolves the same way
+                    gate_repo, gate_subfolder = override, None
+                    parts = gate_repo.split('/')
+                    if len(parts) >= 3:
+                        gate_repo = '/'.join(parts[:2])
+                        gate_subfolder = '/'.join(parts[2:])
+                    allow_sdnq = not model_quant.skip_small_module(transformers.AutoModel, gate_repo, module='TE', subfolder=gate_subfolder, dtype=dtype)
+            elif allow_shared:
+                shared_resolution = get_shared(cls_name, repo_id, subfolder=subfolder, variant=variant, shared_id=shared_id)
+                gate_repo, gate_args = shared_resolution
+                allow_sdnq = not model_quant.skip_small_module(cls_name, gate_repo, module='TE', subfolder=gate_args.get('subfolder', None), revision=revision, dtype=dtype, config=gate_args.get('config', None))
+            else:
+                allow_sdnq = not model_quant.skip_small_module(cls_name, repo_id, module='TE', subfolder=subfolder, revision=revision, dtype=dtype)
+        load_args, quant_args = model_quant.get_dit_args(load_config, module='TE', device_map=True, allow_quant=allow_quant, allow_sdnq=allow_sdnq, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
         quant_type = model_quant.get_quant_type(quant_args)
         load_args.pop('torch_dtype', None)
         dtype = dtype or devices.dtype
@@ -152,7 +176,9 @@ def load_text_encoder(
         # 3. load shared from repo
         if allow_shared and (text_encoder is None):
             log.debug(f'Load model: text_encoder="{repo_id}" cls={cls_name.__name__} quant="{quant_type}" loader={get_loader("transformers")}')
-            target_repo, extra_args = get_shared(cls_name, repo_id, subfolder=subfolder, variant=variant, shared_id=shared_id)
+            if shared_resolution is None:
+                shared_resolution = get_shared(cls_name, repo_id, subfolder=subfolder, variant=variant, shared_id=shared_id)
+            target_repo, extra_args = shared_resolution
             text_encoder = cls_name.from_pretrained(
                 target_repo,
                 cache_dir=shared.opts.hfcache_dir,

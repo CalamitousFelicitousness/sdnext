@@ -22,10 +22,11 @@ def load_vae_override(pipe, load_config=None, override_cls=None, override_args=N
     if not hasattr(cls, 'from_single_file'):
         log.error(f'Load model: vae="{shared.opts.sd_vae}" cls={cls.__name__} safetensors=unsupported')
         return
-    load_args, quant_args = model_quant.get_dit_args(load_config, module='VAE')
+    fn = os.path.join(shared.opts.vae_dir, shared.opts.sd_vae)
+    allow_sdnq = not model_quant.skip_small_file(fn, module='VAE', cls_name=cls.__name__)
+    load_args, quant_args = model_quant.get_dit_args(load_config, module='VAE', allow_sdnq=allow_sdnq)
     log.info(f'Load model: vae="{shared.opts.sd_vae}" cls={cls.__name__} args={load_args} quant={quant_args}')
     try:
-        fn = os.path.join(shared.opts.vae_dir, shared.opts.sd_vae)
         vae = cls.from_single_file(
             fn,
             cache_dir=shared.opts.hfcache_dir,

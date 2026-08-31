@@ -50,37 +50,6 @@ def load_transformer(
         modules_dtype_dict = {}
     jobid = shared.state.begin('Load DiT')
     try:
-        load_args, quant_args = model_quant.get_dit_args(load_config, module='Model', device_map=True, allow_quant=allow_quant, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
-        quant_type = model_quant.get_quant_type(quant_args)
-        dtype = dtype or devices.dtype
-
-        if 'nunchaku-lite' in repo_id.lower():
-            from modules.attention import hijack_kernels
-            hijack_kernels()
-
-        def load_from_repo():
-            nonlocal quant_args
-            log.debug(f'Load model: transformer="{repo_id}" cls={cls_name.__name__} subfolder={subfolder} loader={get_loader("diffusers")} args={load_args}')
-            if 'sdnq-' in repo_id.lower():
-                quant_args = {}
-            if dtype is not None:
-                load_args['torch_dtype'] = dtype
-            if subfolder is not None:
-                load_args['subfolder'] = subfolder
-            if variant is not None:
-                load_args['variant'] = variant
-            if use_safetensors:
-                load_args['use_safetensors'] = True
-            if trust_remote_code:
-                load_args['trust_remote_code'] = True
-            return cls_name.from_pretrained(
-                repo_id,
-                cache_dir=shared.opts.hfcache_dir,
-                **load_args,
-                **quant_args,
-                **kwargs,
-            )
-
         local_file = None
         override_name = None
         fallback = True
@@ -110,6 +79,45 @@ def load_transformer(
             else:
                 return None
             fallback = False
+
+        # the size gate measures the source the load will actually use: the override file when one
+        # is selected, the repo otherwise
+        allow_sdnq = True
+        if allow_quant:
+            if local_file is not None:
+                allow_sdnq = not model_quant.skip_small_file(local_file, module='Model', cls_name=cls_name.__name__)
+            else:
+                allow_sdnq = not model_quant.skip_small_module(cls_name, repo_id, module='Model', subfolder=subfolder, revision=kwargs.get('revision', None), dtype=dtype)
+        load_args, quant_args = model_quant.get_dit_args(load_config, module='Model', device_map=True, allow_quant=allow_quant, allow_sdnq=allow_sdnq, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
+        quant_type = model_quant.get_quant_type(quant_args)
+        dtype = dtype or devices.dtype
+
+        if 'nunchaku-lite' in repo_id.lower():
+            from modules.attention import hijack_kernels
+            hijack_kernels()
+
+        def load_from_repo():
+            nonlocal quant_args
+            log.debug(f'Load model: transformer="{repo_id}" cls={cls_name.__name__} subfolder={subfolder} loader={get_loader("diffusers")} args={load_args}')
+            if 'sdnq-' in repo_id.lower():
+                quant_args = {}
+            if dtype is not None:
+                load_args['torch_dtype'] = dtype
+            if subfolder is not None:
+                load_args['subfolder'] = subfolder
+            if variant is not None:
+                load_args['variant'] = variant
+            if use_safetensors:
+                load_args['use_safetensors'] = True
+            if trust_remote_code:
+                load_args['trust_remote_code'] = True
+            return cls_name.from_pretrained(
+                repo_id,
+                cache_dir=shared.opts.hfcache_dir,
+                **load_args,
+                **quant_args,
+                **kwargs,
+            )
 
         # 1. load gguf
         if local_file is not None and local_file.lower().endswith('.gguf'):

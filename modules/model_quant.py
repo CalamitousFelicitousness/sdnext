@@ -46,6 +46,126 @@ def dont_quant():
     return False
 
 
+def sdnq_weights_dtype(module: str | None = None) -> str | None:
+    """Weights dtype SDNQ would pick for a module, after the text encoder override."""
+    from modules import shared
+    if module in {"TE", "LLM"} and shared.opts.sdnq_quantize_weights_mode_te not in {"Same as model", "default"}:
+        return shared.opts.sdnq_quantize_weights_mode_te
+    return shared.opts.sdnq_quantize_weights_mode
+
+
+def min_size_active(module: str = '') -> bool:
+    """Whether the size gate has a decision to make: a threshold is set and SDNQ would otherwise quantize the module during load."""
+    from modules import shared
+    if shared.opts.sdnq_quantize_min_size <= 0:
+        return False
+    if shared.opts.sdnq_quantize_mode not in {'pre', 'auto'}:
+        return False
+    if module != 'any' and module not in shared.opts.sdnq_quantize_weights:
+        return False
+    weights_dtype = sdnq_weights_dtype(module)
+    if weights_dtype is None or weights_dtype == 'none':
+        return False
+    if module == 'Model' and dont_quant():
+        return False
+    return True
+
+
+def min_size_skip(size: float, module: str = '', cls_name: str = '') -> bool:
+    """Whether a component is under the size at which quantization is set to leave it alone."""
+    from modules import shared
+    threshold = shared.opts.sdnq_quantize_min_size
+    if threshold <= 0 or size <= 0:
+        return False
+    skip = size < threshold
+    log.debug(f'Quantization: module={module} cls={cls_name} size={size:.2f} minimum={threshold:.2f} {"skip" if skip else "quantize"}')
+    return skip
+
+
+def estimate_size(cls, repo_id: str, subfolder: str | None = None, revision: str | None = None, dtype=None, config=None) -> float:
+    """Gigabytes a component occupies once loaded, counted from its config on meta device so no weights are read, or 0 when the config cannot be read.
+
+    The count is taken before the download, which keeps the size gate deciding the same way on a
+    first load as on a cached one. ``config`` takes a preloaded config object and skips the fetch.
+    """
+    from modules import devices, shared
+    if cls is None or repo_id is None or repo_id.lower() == 'none':
+        return 0
+    args = {'cache_dir': shared.opts.hfcache_dir}
+    if subfolder:
+        args['subfolder'] = subfolder
+    if revision:
+        args['revision'] = revision
+    if shared.opts.offline_mode:
+        args['local_files_only'] = True
+    try:
+        import transformers
+        from accelerate import init_empty_weights
+        if config is not None:
+            pass
+        elif issubclass(cls, transformers.PreTrainedModel):
+            # the component's own config class rather than AutoConfig, which additionally needs a
+            # model_type it recognises. The dict is what gets checked because a repo with no config
+            # file yields the class defaults rather than an error, and those describe another model
+            config_dict, _ = cls.config_class.get_config_dict(repo_id, **args)
+            if not config_dict:
+                log.debug(f'Quantization: size repo="{repo_id}" subfolder={subfolder} no config')
+                return 0
+            config = cls.config_class.from_dict(config_dict)
+        elif getattr(cls, '_model_mapping', None) is not None:
+            # a transformers auto class resolves its config the same way it resolves its model
+            config = transformers.AutoConfig.from_pretrained(repo_id, **args)
+        else:
+            config = cls.load_config(repo_id, **args)
+        with init_empty_weights(include_buffers=True):
+            model = cls._from_config(config) if issubclass(cls, transformers.PreTrainedModel) else cls.from_config(config) # pylint: disable=protected-access
+            if hasattr(model, 'tie_weights'):
+                model.tie_weights() # meta init skips the tie, and untied embeddings double-count
+        tensors = set(model.parameters()) | set(model.buffers())
+        numel = sum(t.numel() for t in tensors)
+    except Exception as e:
+        log.debug(f'Quantization: size repo="{repo_id}" subfolder={subfolder} {e}')
+        return 0
+    # the config carries its own dtype, but the component is loaded at the device dtype and that is
+    # what quantization would be saving against
+    return numel * (dtype or devices.dtype).itemsize / 1024**3
+
+
+def skip_small_module(cls, repo_id: str, module: str = '', subfolder: str | None = None, revision: str | None = None, dtype=None, config=None) -> bool:
+    """Size gate for the component loaders, which hold a repo rather than a model."""
+    from modules import shared
+    if not min_size_active(module):
+        return False
+    if repo_id is not None and 'sdnq-' in repo_id.lower():
+        return False # prequantized repos are not quantization candidates
+    size = estimate_size(cls, repo_id, subfolder=subfolder, revision=revision, dtype=dtype, config=config)
+    if size <= 0:
+        # an unreadable config leaves the component quantized, which is the behaviour without the
+        # setting, so the load says the check did not run rather than looking like it passed
+        log.info(f'Quantization: module={module} cls={getattr(cls, "__name__", "")} repo="{repo_id}" size=unknown minimum={shared.opts.sdnq_quantize_min_size:.2f} quantize')
+        return False
+    return min_size_skip(size, module, getattr(cls, '__name__', ''))
+
+
+def skip_small_file(path: str, module: str = '', cls_name: str = '') -> bool:
+    """Size gate for single-file overrides, measured as the file's stored bytes.
+
+    A file stored above the load dtype (an fp32 checkpoint loaded as bf16) measures large and errs
+    toward quantizing.
+    """
+    from modules import shared
+    if not min_size_active(module):
+        return False
+    try:
+        size = os.path.getsize(path) / 1024**3
+    except OSError:
+        size = 0
+    if size <= 0:
+        log.info(f'Quantization: module={module} file="{path}" size=unknown minimum={shared.opts.sdnq_quantize_min_size:.2f} quantize')
+        return False
+    return min_size_skip(size, module, cls_name)
+
+
 def create_trt_config(kwargs = None, allow: bool = True, module: str = 'Model', modules_to_not_convert: list | None = None):
     from modules import shared
     if allow and (module == 'any' or module in shared.opts.trt_quantization):
@@ -107,10 +227,7 @@ def create_sdnq_config(kwargs = None,
         from sdnq import SDNQConfig
 
         if weights_dtype is None:
-            if module in {"TE", "LLM"} and shared.opts.sdnq_quantize_weights_mode_te not in {"Same as model", "default"}:
-                weights_dtype = shared.opts.sdnq_quantize_weights_mode_te
-            else:
-                weights_dtype = shared.opts.sdnq_quantize_weights_mode
+            weights_dtype = sdnq_weights_dtype(module)
         if weights_dtype is None or weights_dtype == 'none':
             return kwargs
 
@@ -223,13 +340,13 @@ def check_nunchaku(module: str = ''):
     return False
 
 
-def create_config(kwargs = None, allow: bool = True, module: str = 'Model', modules_to_not_convert: list | None = None, modules_dtype_dict: dict | None = None):
+def create_config(kwargs = None, allow: bool = True, allow_sdnq: bool = True, module: str = 'Model', modules_to_not_convert: list | None = None, modules_dtype_dict: dict | None = None):
     if kwargs is None:
         kwargs = {}
     if module == 'Model' and dont_quant():
         return kwargs
     kwargs = create_sdnq_config(kwargs,
-                                allow=allow,
+                                allow=allow and allow_sdnq,
                                 module=module,
                                 modules_to_not_convert=modules_to_not_convert,
                                 modules_dtype_dict=modules_dtype_dict
@@ -376,6 +493,11 @@ def sdnq_quantize_model(model, op=None, sd_model=None, do_gc: bool = True, weigh
         log.warning(f'Quantization: Trying to quantize a pre-quantized model. Skipping quantization of module="{op if op is not None else model.__class__}"')
         return model
 
+    if shared.opts.sdnq_quantize_min_size > 0:
+        from modules.sd_offload_utils import get_module_size
+        if min_size_skip(get_module_size(model)[0], op or 'model', model.__class__.__name__):
+            return model
+
     if weights_dtype is None:
         if (op is not None) and ("text_encoder" in op or op in {"TE", "LLM"}) and (shared.opts.sdnq_quantize_weights_mode_te not in {"Same as model", "default"}):
             weights_dtype = shared.opts.sdnq_quantize_weights_mode_te
@@ -518,7 +640,7 @@ def sdnq_quantize_weights(sd_model):
     return sd_model
 
 
-def get_dit_args(load_config: dict | None = None, module: str | None = None, device_map: bool = False, allow_quant: bool = True, modules_to_not_convert: list | None = None, modules_dtype_dict: dict | None = None):
+def get_dit_args(load_config: dict | None = None, module: str | None = None, device_map: bool = False, allow_quant: bool = True, allow_sdnq: bool = True, modules_to_not_convert: list | None = None, modules_dtype_dict: dict | None = None):
     from modules import shared, devices
     config = {} if load_config is None else load_config.copy()
     if 'torch_dtype' not in config:
@@ -543,7 +665,7 @@ def get_dit_args(load_config: dict | None = None, module: str | None = None, dev
             # Quantized transformer/text encoder loads should default to cpu device_map when low_cpu_mem_usage is requested to avoid full in-memory checkpoint expansion
             config['device_map'] = 'cpu'
     if allow_quant:
-        quant_args = create_config(module=module, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
+        quant_args = create_config(module=module, allow_sdnq=allow_sdnq, modules_to_not_convert=modules_to_not_convert, modules_dtype_dict=modules_dtype_dict)
     else:
         quant_args = {}
     return config, quant_args
