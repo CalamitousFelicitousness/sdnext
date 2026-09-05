@@ -128,8 +128,8 @@ def dequantize_rowwise(q, scale):
     return q.to(torch.float32) * scale
 
 
-def lookup(network_layer_name):
-    """Cached (up, down, energy, calibrated, rms) for a layer, or None; factors return as fp32.
+def lookup_raw(network_layer_name):
+    """Cached entry as stored: (up_q, up_s, down_q, down_s, energy, calibrated, rms), or None.
 
     Pure lookup with no hit/miss accounting: the fast-path probe uses it so a
     layer is only counted once, by whichever caller consumes the answer.
@@ -144,7 +144,27 @@ def lookup(network_layer_name):
     rms = st.get(f'{network_layer_name}.rms')
     if up_q is None or up_s is None or down_q is None or down_s is None or energy is None or calib is None or rms is None:
         return None
-    return dequantize_rowwise(up_q, up_s), dequantize_rowwise(down_q, down_s), float(energy), bool(calib), float(rms)
+    return up_q, up_s, down_q, down_s, float(energy), bool(calib), float(rms)
+
+
+def lookup(network_layer_name):
+    """Cached (up, down, energy, calibrated, rms) for a layer, or None; factors return as fp32."""
+    raw = lookup_raw(network_layer_name)
+    if raw is None:
+        return None
+    up_q, up_s, down_q, down_s, energy, calib, rms = raw
+    return dequantize_rowwise(up_q, up_s), dequantize_rowwise(down_q, down_s), energy, calib, rms
+
+
+def fetch_raw(network_layer_name):
+    """``lookup_raw`` with the same hit/miss accounting as ``fetch``."""
+    entry = lookup_raw(network_layer_name)
+    if entry is None:
+        if state['sig'] is not None:
+            state['misses'] += 1
+        return None
+    state['hits'] += 1
+    return entry
 
 
 def note_hit():
@@ -186,8 +206,8 @@ def store_scores(network_layer_name, scores, abs_sums):
     state['dirty'] = True
 
 
-def store(network_layer_name, up, down, energy, calibrated, rms):
-    """Quantize-before-use: returns the dequantized round-trip the caller must apply.
+def store_raw(network_layer_name, up, down, energy, calibrated, rms):
+    """Quantize the pair and return it as stored: (up_q, up_s, down_q, down_s).
 
     The factors quantize to rowwise int8 whether or not a cache entry can be
     written, so the factors applied now, the factors a later hit replays, and a
@@ -208,6 +228,12 @@ def store(network_layer_name, up, down, energy, calibrated, rms):
         st[f'{network_layer_name}.calib'] = torch.tensor(1 if calibrated else 0, dtype=torch.uint8)
         st[f'{network_layer_name}.rms'] = torch.tensor(float(rms))
         state['dirty'] = True
+    return up_q, up_s, down_q, down_s
+
+
+def store(network_layer_name, up, down, energy, calibrated, rms):
+    """Quantize-before-use: returns the dequantized round-trip the caller must apply."""
+    up_q, up_s, down_q, down_s = store_raw(network_layer_name, up, down, energy, calibrated, rms)
     return dequantize_rowwise(up_q, up_s).to(up.dtype), dequantize_rowwise(down_q, down_s).to(down.dtype)
 
 
