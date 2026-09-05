@@ -88,9 +88,9 @@ def build_layer(weights_dtype='cb4', seed=0):
 # --- ingest ---
 
 def pack_kijai(idx: torch.Tensor) -> torch.Tensor:
-    # the container packs the even flat index into the HIGH nibble (hi_first)
+    # the container packs the even flat index into the LOW nibble, verified against a kijai MiniMax-H3 w4a8 file
     pairs = idx.reshape(idx.shape[0], -1, 2)
-    return (pairs[..., 0] << 4 | pairs[..., 1]).to(torch.uint8).view(torch.int8)
+    return (pairs[..., 1] << 4 | pairs[..., 0]).to(torch.uint8).view(torch.int8)
 
 
 def make_w4a8_sidecars(out_f: int, in_f: int, group_size: int, seed: int):
@@ -140,7 +140,7 @@ def test_ingest_nibble_order_roundtrip():
     lin = torch.nn.Linear(16, 16, bias=False, device='meta')
     adopt_asym_w4a8_layer(sd, name, lin, 'test', {'format': 'asym_w4a8_int8', 'group_size': 16})
     unpacked = unpack_int(sd[f'{name}.weight'], 'cb4', torch.Size((16, 1, 16))).reshape(16, 16)
-    assert torch.equal(unpacked.to(torch.uint8), idx), 'nibble swap does not recover the original index order'
+    assert torch.equal(unpacked.to(torch.uint8), idx), 'nibble order does not recover the original index order'
 
 
 def test_ingest_convrot_roundtrip():
