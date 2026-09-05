@@ -678,12 +678,12 @@ def adopt_nvfp4_layer(sd: dict, name: str, linear: torch.nn.Linear, component_na
 def adopt_asym_w4a8_layer(sd: dict, name: str, linear: torch.nn.Linear, component_name: str, meta: dict) -> None:
     """Rewrite one asym_w4a8_int8 layer's tensors in place into SDNQ cb4 layout.
 
-    Reinterprets the int8-packed 4-bit index pairs as uint8 and swaps the
-    nibble order (the container packs the even element into the high nibble,
-    SDNQ unpacks low-first), folds the fp32 per-channel scale into the e4m3
-    per-group relative scales as ``[out, groups, 1]`` fp32 grouped scales, and
-    keeps the fp32 codebook unsnapped: stored indices reference the stored
-    level order, so the codebook is adopted verbatim.
+    Reinterprets the int8-packed 4-bit index pairs as uint8 and keeps the
+    nibble order (the container packs the even element into the low nibble,
+    which is the order SDNQ unpacks), folds the fp32 per-channel scale into
+    the e4m3 per-group relative scales as ``[out, groups, 1]`` fp32 grouped
+    scales, and keeps the fp32 codebook unsnapped: stored indices reference
+    the stored level order, so the codebook is adopted verbatim.
     """
     out_features, in_features = linear.out_features, linear.in_features
     group_size = int(meta.get("group_size", W4A8_GROUP_SIZE))
@@ -721,9 +721,7 @@ def adopt_asym_w4a8_layer(sd: dict, name: str, linear: torch.nn.Linear, componen
             f"{name!r} sidecar shapes codebook={tuple(codebook.shape)} s_channel={tuple(s_channel.shape)} "
             f"s_rel={tuple(s_rel.shape)} do not match out={out_features} groups={groups}"
         )
-    weight = weight.view(torch.uint8) # reinterpret before any nibble op: arithmetic shift on int8 sign-extends
-    weight = torch.bitwise_or(torch.bitwise_left_shift(torch.bitwise_and(weight, 15), 4), torch.bitwise_right_shift(weight, 4))
-    sd[f"{name}.weight"] = weight
+    sd[f"{name}.weight"] = weight.view(torch.uint8) # low nibble first, the same order SDNQ unpacks
     sd[f"{name}.scale"] = s_rel.to(torch.float32).mul_(s_channel.to(torch.float32).reshape(-1, 1)).unsqueeze(-1)
     sd[f"{name}.codebook"] = codebook.to(torch.float32).reshape(-1)
 
@@ -890,7 +888,7 @@ def build_component_prequantized(
     stored rotation; nvfp4 layers keep their packed 4-bit codes (nibble order
     swapped once) and land on SDNQ's grouped quantization with the block and
     global scales folded into fp32 per-group scales; asym_w4a8_int8 layers
-    keep their packed codebook indices (nibble order swapped once) and adopt
+    keep their packed codebook indices (low nibble first, as SDNQ unpacks) and adopt
     the fp32 codebook verbatim as SDNQ cb4 with folded fp32 grouped scales.
     The file dictates which layers are quantized, independent of the user's
     quantization settings, and floating-point SDNQ params are not cast to the
