@@ -137,6 +137,7 @@ def dq(layer):
     return layer.sdnq_dequantizer(layer.weight, layer.scale, zero_point=layer.zero_point,
                                   svd_up=layer.svd_up, svd_down=layer.svd_down,
                                   skip_quantized_matmul=layer.sdnq_dequantizer.use_quantized_matmul,
+                                  **({'codebook': layer.codebook} if getattr(layer, 'codebook', None) is not None else {}),
                                   dtype=torch.float32, skip_compile=True)
 
 
@@ -558,6 +559,31 @@ def test_partial_coverage_layers_stay_independent():
         activate()
         assert torch.equal(dq(layer_plain), Wdq0), 'factor layer must restore bit-exact'
         assert torch.equal(dq(layer_dora), Wdq0_dora), 'fallback layer must restore bit-exact'
+    return True
+
+
+def test_codebook_requantize_backs_up_and_restores():
+    """The cb requantize fallback fits a new codebook for the modified weights, so
+    the original must ride the backup with scale and zero point: restored indices
+    against a stale codebook would silently decode to wrong weights."""
+    layer = build_layer('cb4')
+    assert layer.codebook is not None and layer.codebook.dtype == torch.int8, 'cb4 layer must carry an int8 codebook'
+    A2, B2, _ = make_delta(seed=5, sigma=3e-3)
+    net_dora = make_net('doracb', layer, A2, B2, dora=True) # non-factorable: pins the requantize fallback
+
+    with host_rank(0), mock_model(lin=layer):
+        Wdq0 = dq(layer)
+        cb0 = layer.codebook.detach().clone()
+        activate(net_dora)
+        assert isinstance(getattr(layer, 'network_weights_backup', None), torch.Tensor), 'requantize fallback must take a tensor backup'
+        assert isinstance(getattr(layer, 'sdnq_codebook_backup', None), torch.Tensor), 'codebook must be backed up alongside scale'
+        assert torch.equal(layer.sdnq_codebook_backup.to(DEVICE), cb0), 'codebook backup must hold the original levels'
+        assert layer.codebook is not None, 'requantize must attach a fresh codebook'
+        assert not torch.equal(dq(layer), Wdq0), 'fallback must have requantized the weights'
+
+        activate()
+        assert torch.equal(layer.codebook.detach().to(DEVICE), cb0), 'restore must bring back the original codebook'
+        assert torch.equal(dq(layer), Wdq0), 'unload must restore the dequantized weight bit-exact'
     return True
 
 
@@ -2370,6 +2396,7 @@ def dq_compiled(layer):
     return layer.sdnq_dequantizer(layer.weight, layer.scale, zero_point=layer.zero_point,
                                   svd_up=layer.svd_up, svd_down=layer.svd_down,
                                   skip_quantized_matmul=layer.sdnq_dequantizer.use_quantized_matmul,
+                                  **({'codebook': layer.codebook} if getattr(layer, 'codebook', None) is not None else {}),
                                   dtype=torch.float32)
 
 
@@ -3004,6 +3031,7 @@ def run_tests():
         run_test(CAT_E2E, fn)
     log.warning('=== Set transitions ===')
     for fn in [test_mixed_family_transition_restores_base, test_partial_coverage_layers_stay_independent,
+               test_codebook_requantize_backs_up_and_restores,
                test_apply_restore_preserves_weight_storage, test_fuse_promote_applies_new_multiplier, test_fuse_change_then_remove_restores_pristine,
                test_mechanism_gate_declines_candidates, test_requantize_option_routes_to_legacy_path,
                test_mechanism_flip_strips_attached_factors, test_mechanism_flip_restore_pass_strips]:
