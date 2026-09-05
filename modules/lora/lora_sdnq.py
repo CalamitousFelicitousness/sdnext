@@ -291,11 +291,16 @@ def host_candidate(self, network_layer_name, wanted_names):
 
 
 def grid_step(self):
-    """Mean grid step in weight units; a codebook layer keeps its Lloyd levels in the scale slot, so its step is their mean adjacent gap."""
+    """Mean grid step in weight units; codebook layers store levels, so the step is their mean adjacent gap: in the scale slot for use_codebook, in the int8 book times the scale for the cb dtypes."""
     scale = self.scale.detach().float()
     if self.sdnq_dequantizer.use_codebook:
         return float(scale.diff(dim=-1).mean())
+    codebook = getattr(self, "codebook", None)
+    if codebook is not None and codebook.numel() > 1:
+        return float(scale.mean()) * float(codebook.detach().float().sort().values.diff().mean())
     return float(scale.mean())
+
+
 
 
 def apply_cached(self, network_layer_name, wanted_names):
