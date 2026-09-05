@@ -49,6 +49,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('SD_INSTALL_QUIET', '1')
 
 
+def codebook_kwarg(codebook):
+    # the shared-codebook dtypes carry one more tensor the dequantizer needs; stock sdnq has no such keyword
+    return {"codebook": codebook} if codebook is not None else {}
+
+
+def grid_step(scale, codebook):
+    # per-group grid step; the cb dtypes scale book levels, so the step is the scale times the book's mean adjacent-level gap (as lora_sdnq.grid_step)
+    step = scale.float()
+    if codebook is not None and codebook.numel() > 1:
+        step = step * codebook.to(step.device, torch.float32).sort().values.diff().mean()
+    return step
+
+
 def parse_cli():
     parser = argparse.ArgumentParser(description='lora-quant-fidelity')
     parser.add_argument('--model', required=True, help='model dir, transformer dir, or org/name repo id')
@@ -256,7 +269,7 @@ class QuantRepo:
     """Per-module access to a pre-quantized SDNQ repo: a meta skeleton built through the sdnq conversion, each layer's
     tensors streamed from the shards while it is analyzed; tensors outside the block stacks stay resident for the arch hooks."""
 
-    LAYER_KEYS = ('weight', 'bias', 'scale', 'zero_point', 'svd_up', 'svd_down')
+    LAYER_KEYS = ('weight', 'bias', 'scale', 'zero_point', 'svd_up', 'svd_down', 'codebook')
 
     def __init__(self, model_dir, model_config, arch=None):
         from accelerate import init_empty_weights
@@ -391,7 +404,7 @@ def analyze_module(W_dq, deq_params, mods, calib_rms=None, step_live=None, noise
     is measured as applied. A module is factor-path eligible only when every
     contribution is a plain additive lora. With ``calib_rms``, hosting mirrors
     the calibrated production path and its rho is scored in the weighted norm.
-    With ``step_live`` (the layer's own pre-add scale), the production routing
+    With ``step_live`` (the layer's own pre-add grid step), the production routing
     rule applies: a delta fat against the grid whose truncation capture is low
     reports the requantize path, the way the loader would route it.
 
@@ -443,9 +456,9 @@ def analyze_module(W_dq, deq_params, mods, calib_rms=None, step_live=None, noise
                   svd_steps=deq_params.get('svd_steps', 8), use_quantized_matmul=False, dequantize_fp32=False)
         deq2, data2 = sdnq_quantize_layer_weight(W_dq + D, **kw)
         W2 = deq2(data2['weight'], data2['scale'], zero_point=data2['zero_point'],
-                  svd_up=data2['svd_up'], svd_down=data2['svd_down'], dtype=torch.float32, skip_compile=True)
+                  svd_up=data2['svd_up'], svd_down=data2['svd_down'], dtype=torch.float32, skip_compile=True, **codebook_kwarg(data2.get('codebook')))
         Dh = rotate_hadamard(D, group_size=deq_params['hadamard_group_size']) if deq_params['use_hadamard'] else D
-        step = data2['scale'].float()
+        step = grid_step(data2['scale'], data2.get('codebook'))
         Dg = Dh.unflatten(-1, (step.shape[1], -1)) if step.ndim == 3 else Dh
         step_ratio = float((Dg.abs() / step).mean())
         crossers = float((Dg.abs() > step / 2).float().mean())
@@ -574,11 +587,11 @@ def main():
                         continue
                     layer = repo.materialize(lname)
                     W_dq = deq(layer.weight, layer.scale, zero_point=layer.zero_point, svd_up=layer.svd_up, svd_down=layer.svd_down,
-                               skip_quantized_matmul=deq.use_quantized_matmul, dtype=torch.float32, skip_compile=True).to(device)
+                               skip_quantized_matmul=deq.use_quantized_matmul, dtype=torch.float32, skip_compile=True, **codebook_kwarg(getattr(layer, 'codebook', None))).to(device)
                     params = dict(weights_dtype=deq.weights_dtype, group_size=deq.group_size, hadamard_group_size=deq.hadamard_group_size,
                                   use_hadamard=deq.use_hadamard, use_svd=layer.svd_up is not None, svd_rank=deq.svd_rank, svd_steps=deq.svd_steps,
                                   use_codebook=getattr(deq, 'use_codebook', False))
-                    step_live = layer.scale.detach().to(device)
+                    step_live = grid_step(layer.scale.detach().to(device), getattr(layer, 'codebook', None))
                     repo.release(lname)
                     sd_module = layer
                     if reference is not None:
@@ -607,9 +620,9 @@ def main():
                         deq0, data0 = sdnq_quantize_layer_weight(W.to(device, torch.float32), layer_class_name='Linear', weights_dtype=args.dtype,
                                                                  group_size=args.group, hadamard_group_size=args.hadamard_group, use_hadamard=args.hadamard_group > 0,
                                                                  use_svd=False, use_quantized_matmul=False, dequantize_fp32=False, torch_dtype=torch.bfloat16)
-                        W_dq = deq0(data0['weight'], data0['scale'], zero_point=data0['zero_point'], svd_up=None, svd_down=None, dtype=torch.float32, skip_compile=True)
+                        W_dq = deq0(data0['weight'], data0['scale'], zero_point=data0['zero_point'], svd_up=None, svd_down=None, dtype=torch.float32, skip_compile=True, **codebook_kwarg(data0.get('codebook')))
                         params = dict(weights_dtype=args.dtype, group_size=deq0.group_size, hadamard_group_size=deq0.hadamard_group_size, use_hadamard=deq0.use_hadamard)
-                        step_live = data0['scale'].detach()
+                        step_live = grid_step(data0['scale'].detach(), data0.get('codebook'))
                         noise = noise_energies.get(path) or measure_noise(path, W_dq - W.to(device, torch.float32)) # the simulated grid's own error, measured
                     sd_module = make_stub(W.shape)
                 try:
