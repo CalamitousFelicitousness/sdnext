@@ -94,6 +94,16 @@ def get_sdnq_devices(mode="pre"):
     return quantization_device, return_device
 
 
+def sdnq_use_codebook(weights_dtype: str) -> bool:
+    """The codebook dtypes carry their own shared codebook, so the per-row use_codebook option is dropped for them with a warning."""
+    from modules import shared
+    from sdnq.common import dtype_dict
+    if shared.opts.sdnq_use_codebook and dtype_dict.get(weights_dtype, {}).get('is_codebook', False):
+        log.warning(f'Quantization: type=sdnq dtype={weights_dtype} carries its own codebook: ignoring use_codebook')
+        return False
+    return shared.opts.sdnq_use_codebook
+
+
 def create_sdnq_config(kwargs = None,
                        allow: bool = True,
                        module: str = 'Model',
@@ -163,7 +173,7 @@ def create_sdnq_config(kwargs = None,
             dynamic_loss_threshold=shared.opts.sdnq_dynamic_loss_threshold,
             use_svd=shared.opts.sdnq_use_svd,
             use_hadamard=shared.opts.sdnq_use_hadamard,
-            use_codebook=shared.opts.sdnq_use_codebook,
+            use_codebook=sdnq_use_codebook(weights_dtype),
             quant_conv=shared.opts.sdnq_quantize_conv_layers,
             quant_embedding=shared.opts.sdnq_quantize_embedding_layers,
             use_quantized_matmul=use_quantized_matmul,
@@ -437,7 +447,7 @@ def sdnq_quantize_model(model, op=None, sd_model=None, do_gc: bool = True, weigh
         dynamic_loss_threshold=shared.opts.sdnq_dynamic_loss_threshold,
         use_svd=shared.opts.sdnq_use_svd,
         use_hadamard=shared.opts.sdnq_use_hadamard,
-        use_codebook=shared.opts.sdnq_use_codebook,
+        use_codebook=sdnq_use_codebook(weights_dtype),
         quant_conv=shared.opts.sdnq_quantize_conv_layers,
         quant_embedding=shared.opts.sdnq_quantize_embedding_layers,
         use_quantized_matmul=use_quantized_matmul,
