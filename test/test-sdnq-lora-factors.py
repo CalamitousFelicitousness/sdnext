@@ -138,7 +138,23 @@ def dq(layer):
                                   svd_up=layer.svd_up, svd_down=layer.svd_down,
                                   skip_quantized_matmul=layer.sdnq_dequantizer.use_quantized_matmul,
                                   **({'codebook': layer.codebook} if getattr(layer, 'codebook', None) is not None else {}),
+                                  **({'svd_up_q': layer.svd_up_q, 'svd_up_scale': layer.svd_up_scale, 'svd_down_q': layer.svd_down_q, 'svd_down_scale': layer.svd_down_scale} if getattr(layer, 'svd_up_q', None) is not None else {}),
                                   dtype=torch.float32, skip_compile=True)
+
+
+def hosted_pair(layer):
+    """The hosted factors as fp32 [out, r] / [r, in], read from whichever channel carries them."""
+    from modules.lora import lora_factor_cache as fc
+    if getattr(layer, 'svd_up_q', None) is not None:
+        up = fc.dequantize_rowwise(layer.svd_up_q, layer.svd_up_scale)
+        down = fc.dequantize_rowwise(layer.svd_down_q, layer.svd_down_scale)
+    else:
+        up, down = layer.svd_up.detach().float(), layer.svd_down.detach().float()
+    return (up.t(), down.t()) if layer.sdnq_dequantizer.use_quantized_matmul else (up, down)
+
+
+def hosted_rank(layer):
+    return hosted_pair(layer)[0].shape[1]
 
 
 def make_delta(seed=1, sigma=3e-4):
@@ -831,8 +847,8 @@ def test_hosted_null_tail_collapses_to_effective_rank():
     with host_rank(256), mock_model(lin=layer):
         Wdq0 = dq(layer)
         activate(net)
-        assert layer.svd_up.shape[1] == 8, f'rank-8 delta under cap 256 must store 8 ranks, got {layer.svd_up.shape[1]}'
-        assert layer.svd_down.shape[0] == 8, f'down factor must slice with the up factor, got {layer.svd_down.shape[0]}'
+        assert hosted_rank(layer) == 8, f'rank-8 delta under cap 256 must store 8 ranks, got {hosted_rank(layer)}'
+        assert hosted_pair(layer)[1].shape[0] == 8, f'down factor must slice with the up factor, got {hosted_pair(layer)[1].shape[0]}'
         rho = rho_of(dq(layer) - Wdq0, D)
         assert rho > 0.95, f'collapsing the null tail must not cost fidelity: rho={rho:.4f}'
         activate()
@@ -847,8 +863,82 @@ def test_hosted_flat_spectrum_keeps_cap():
     net = make_dense_net('flattail', layer, D)
     with host_rank(64), mock_model(lin=layer):
         activate(net)
-        assert layer.svd_up.shape[1] == 64, f'a flat spectrum must keep the full cap, got {layer.svd_up.shape[1]}'
+        assert hosted_rank(layer) == 64, f'a flat spectrum must keep the full cap, got {hosted_rank(layer)}'
         activate()
+    return True
+
+
+def test_hosted_channel_matches_bf16_concat():
+    """The merged int8 channel must materialize bit-identically to a single bf16 concat of the same values."""
+    if not lora_sdnq.channel_int8_available():
+        log.info('  skipped: the loaded sdnq has no int8 factor channel')
+        return True
+    from modules.lora import lora_factor_cache as fc
+    layer = build_layer('uint4')
+    A, B, _D1 = make_delta(seed=61)
+    torch.manual_seed(62)
+    D2 = torch.randn(OUT_F, IN_F, device=DEVICE) * 1e-2
+    net1 = make_net('i8mixp', layer, A, B)
+    net2 = make_dense_net('i8mixf', layer, D2)
+    with host_rank(64), mock_model(lin=layer):
+        Wdq0 = dq(layer)
+        activate(net1, net2)
+        assert layer.svd_up is not None and layer.svd_up_q is not None, 'a mixed set must populate both channels'
+        assert layer.svd_up_q.dtype == torch.int8 and layer.svd_up_scale.dtype == torch.float32
+        W_split = dq(layer)
+        up_h = fc.dequantize_rowwise(layer.svd_up_q, layer.svd_up_scale).to(layer.svd_up.dtype)
+        down_h = fc.dequantize_rowwise(layer.svd_down_q, layer.svd_down_scale).to(layer.svd_down.dtype)
+        W_manual = layer.sdnq_dequantizer(layer.weight, layer.scale, zero_point=layer.zero_point,
+                                          svd_up=torch.cat([layer.svd_up, up_h], dim=1),
+                                          svd_down=torch.cat([layer.svd_down, down_h], dim=0),
+                                          skip_quantized_matmul=False, dtype=torch.float32, skip_compile=True)
+        assert torch.equal(W_split, W_manual), 'merged channel must match the manual bf16 concat bit-exactly'
+        activate()
+        assert layer.svd_up_q is None and layer.svd_up_scale is None, 'removal must clear the quantized channel'
+        assert torch.equal(dq(layer), Wdq0), 'removal must restore bit-exact'
+    return True
+
+
+def test_hosted_matmul_layout_int8_channel():
+    """Matmul layout stores the channel transposed with oriented scales; merge and removal stay exact."""
+    if not lora_sdnq.channel_int8_available():
+        log.info('  skipped: the loaded sdnq has no int8 factor channel')
+        return True
+    from modules.lora import lora_factor_cache as fc
+    layer = build_layer('uint4', use_quantized_matmul=True)
+    torch.manual_seed(63)
+    D = torch.randn(OUT_F, IN_F, device=DEVICE) * 3e-4 # thin delta: the routing rule keeps it hosted
+    net = make_dense_net('i8mm', layer, D)
+    with host_rank(64), mock_model(lin=layer):
+        Wdq0 = dq(layer)
+        activate(net)
+        assert layer.svd_up is None and layer.svd_up_q is not None, 'a hosted-only set rides the quantized channel alone'
+        assert layer.svd_up_q.shape[0] == 64 and layer.svd_down_q.shape[1] == 64, 'matmul layout stores the channel transposed'
+        assert layer.svd_up_scale.shape[0] == 1 and layer.svd_down_scale.shape[0] == 1, 'scales ride transposed with the channel'
+        W_split = dq(layer)
+        assert not torch.equal(W_split, Wdq0), 'hosted channel must act on the materialized weight'
+        W_manual = layer.sdnq_dequantizer(layer.weight, layer.scale, zero_point=layer.zero_point,
+                                          svd_up=fc.dequantize_rowwise(layer.svd_up_q, layer.svd_up_scale),
+                                          svd_down=fc.dequantize_rowwise(layer.svd_down_q, layer.svd_down_scale),
+                                          skip_quantized_matmul=True, dtype=torch.float32, skip_compile=True)
+        assert torch.equal(W_split, W_manual), 'transposed merge must match the manual pair bit-exactly'
+        activate()
+        assert torch.equal(dq(layer), Wdq0), 'removal must restore bit-exact'
+    return True
+
+
+def test_plain_lora_keeps_bf16_channel():
+    """Factorable-only sets stay on the full-precision pair; the quantized channel never engages."""
+    layer = build_layer('uint4')
+    A, B, _D = make_delta(seed=64)
+    net = make_net('i8plain', layer, A, B)
+    with host_rank(64), mock_model(lin=layer):
+        Wdq0 = dq(layer)
+        activate(net)
+        assert layer.svd_up is not None, 'exact members stay on the full-precision pair'
+        assert getattr(layer, 'svd_up_q', None) is None, 'a factorable-only set must not touch the quantized channel'
+        activate()
+        assert torch.equal(dq(layer), Wdq0), 'removal must restore bit-exact'
     return True
 
 
@@ -1392,8 +1482,10 @@ def test_factor_cache_roundtrip_bitexact():
             net, _D = cache_fixture(tmp, layer)
             Wdq0 = dq(layer)
             activate(net)
-            first_up = layer.svd_up.detach().clone()
-            first_down = layer.svd_down.detach().clone()
+            first_up, first_down = [t.clone() for t in hosted_pair(layer)]
+            if getattr(layer, 'svd_up_q', None) is not None:
+                resident_bytes = layer.svd_up_q.numel() + layer.svd_down_q.numel() + (layer.svd_up_scale.numel() + layer.svd_down_scale.numel()) * 4
+                assert resident_bytes < (first_up.numel() + first_down.numel()) * 2 * 0.62, f'resident channel must be about half the bf16 factor bytes: {resident_bytes}'
             activate() # pass end flushed the entry; unload restores the base
             files = os.listdir(os.path.join(tmp, 'cache'))
             assert len(files) == 1, f'one cache entry expected, got {files}'
@@ -1406,8 +1498,8 @@ def test_factor_cache_roundtrip_bitexact():
                 activate(net) # same configuration: must replay from disk without touching the svd
             finally:
                 torch.svd_lowrank = real_svd
-            assert torch.equal(layer.svd_up, first_up), 'cache hit must replay bit-identical up factors'
-            assert torch.equal(layer.svd_down, first_down), 'cache hit must replay bit-identical down factors'
+            assert torch.equal(hosted_pair(layer)[0], first_up), 'cache hit must replay bit-identical up factors'
+            assert torch.equal(hosted_pair(layer)[1], first_down), 'cache hit must replay bit-identical down factors'
             activate()
             assert torch.equal(dq(layer), Wdq0), 'unload must restore bit-exact'
     return True
@@ -1420,12 +1512,12 @@ def test_factor_cache_invalidates_on_multiplier():
         with host_rank(64), host_cache(10, os.path.join(tmp, 'cache')), mock_model(lin=layer):
             net, _D = cache_fixture(tmp, layer)
             activate(net)
-            up_full = layer.svd_up.detach().clone()
+            up_full = hosted_pair(layer)[0].clone()
             activate()
             net.te_multiplier = 0.7
             net.unet_multiplier = [0.7] * 3
             activate(net) # different multiplier: different signature, fresh svd, second entry
-            assert not torch.equal(layer.svd_up, up_full), 'multiplier change must produce different factors'
+            assert not torch.equal(hosted_pair(layer)[0], up_full), 'multiplier change must produce different factors'
             activate()
             files = os.listdir(os.path.join(tmp, 'cache'))
             assert len(files) == 2, f'two cache entries expected, got {files}'
@@ -1442,8 +1534,7 @@ def test_attach_trims_stored_null_tail():
         with host_rank(64), host_cache(10, os.path.join(tmp, 'cache')), mock_model(lin=layer):
             net, _D = cache_fixture(tmp, layer, name='padnet')
             activate(net)
-            up0 = layer.svd_up.detach().clone()
-            down0 = layer.svd_down.detach().clone()
+            up0, down0 = [t.clone() for t in hosted_pair(layer)]
             Wl0 = dq(layer)
             activate()
             cache_dir = os.path.join(tmp, 'cache')
@@ -1466,8 +1557,8 @@ def test_attach_trims_stored_null_tail():
                 activate(net)
             finally:
                 torch.svd_lowrank = real_svd
-            assert layer.svd_up.shape[1] == 64, f'attach must trim the padded tail back to the effective rank, got {layer.svd_up.shape[1]}'
-            assert torch.equal(layer.svd_up, up0) and torch.equal(layer.svd_down, down0), 'trimmed factors must match the unpadded entry'
+            assert hosted_rank(layer) == 64, f'attach must trim the padded tail back to the effective rank, got {hosted_rank(layer)}'
+            assert torch.equal(hosted_pair(layer)[0], up0) and torch.equal(hosted_pair(layer)[1], down0), 'trimmed factors must match the unpadded entry'
             assert torch.equal(dq(layer), Wl0), 'trimmed attach must materialize the same weight'
             activate()
     return True
@@ -1516,11 +1607,11 @@ def test_factor_cache_invalidates_on_calib_toggle():
             try:
                 with host_calib(True):
                     activate(net)
-                    up_cal = layer.svd_up.detach().clone()
+                    up_cal = hosted_pair(layer)[0].clone()
                     activate()
                 with host_calib(False):
                     activate(net) # same set with calibration off: the entry keyed under the other setting must miss
-                    up_plain = layer.svd_up.detach().clone()
+                    up_plain = hosted_pair(layer)[0].clone()
                     activate()
                 assert not torch.equal(up_cal, up_plain), 'toggling calibration must not replay factors computed under the other setting'
                 assert len(os.listdir(os.path.join(tmp, 'cache'))) == 2, 'the two settings must key separate cache entries'
@@ -1690,7 +1781,7 @@ def test_dense_two_plain_loras_hosted_not_summed():
         with stack_mode('ties', dens=0.5):
             activate(n1, n2)
             # hosted at rank 64 leaves a rank-64 factor bucket; the exact concat of two rank-8 nets would leave 16
-            assert layer.svd_up.shape[1] == 64, f'dense mode must route a factorable pair to hosting, rank={layer.svd_up.shape[1]}'
+            assert hosted_rank(layer) == 64, f'dense mode must route a factorable pair to hosting, rank={hosted_rank(layer)}'
             eff = dq(layer) - Wdq0
             activate()
         assert torch.equal(dq(layer), Wdq0), 'removal must restore bit-exact'
@@ -2397,6 +2488,7 @@ def dq_compiled(layer):
                                   svd_up=layer.svd_up, svd_down=layer.svd_down,
                                   skip_quantized_matmul=layer.sdnq_dequantizer.use_quantized_matmul,
                                   **({'codebook': layer.codebook} if getattr(layer, 'codebook', None) is not None else {}),
+                                  **({'svd_up_q': layer.svd_up_q, 'svd_up_scale': layer.svd_up_scale, 'svd_down_q': layer.svd_down_q, 'svd_down_scale': layer.svd_down_scale} if getattr(layer, 'svd_up_q', None) is not None else {}),
                                   dtype=torch.float32)
 
 
@@ -2947,11 +3039,11 @@ def test_factor_cache_invalidates_on_block_weight():
         with host_rank(64), host_cache(10, os.path.join(tmp, 'cache')), block_model('sd3', lin=layer):
             net, _D = cache_fixture(tmp, layer)
             activate(net)
-            up_full = layer.svd_up.detach().clone()
+            up_full = hosted_pair(layer)[0].clone()
             activate()
             net.block_spec = sd3_spec(s4=0.5)
             activate(net) # different block vector: different signature, fresh svd, second entry
-            assert not torch.equal(layer.svd_up, up_full), 'a block-weight change must produce different factors'
+            assert not torch.equal(hosted_pair(layer)[0], up_full), 'a block-weight change must produce different factors'
             activate()
             files = os.listdir(os.path.join(tmp, 'cache'))
             assert len(files) == 2, f'two cache entries expected, got {files}'
@@ -3042,7 +3134,8 @@ def run_tests():
                test_route_fat_dense_delta_requantizes, test_declined_host_delta_is_not_recomputed, test_pass_presents_one_wanted_names_tuple,
                test_route_rule_terms_gate_both_ways, test_route_codebook_layer_uses_level_gap, test_route_low_rank_fat_delta_stays_hosted,
                test_route_mixed_set_keeps_hosting, test_route_svd_checkpoint_keeps_hosting, test_route_dense_stack_keeps_hosting,
-               test_route_replay_from_cache, test_hosted_null_tail_collapses_to_effective_rank, test_hosted_flat_spectrum_keeps_cap]:
+               test_route_replay_from_cache, test_hosted_null_tail_collapses_to_effective_rank, test_hosted_flat_spectrum_keeps_cap,
+               test_hosted_channel_matches_bf16_concat, test_hosted_matmul_layout_int8_channel, test_plain_lora_keeps_bf16_channel]:
         run_test(CAT_HOST, fn)
     log.warning('=== Calibration ===')
     for fn in [test_calibrated_hosting_beats_plain, test_calibrated_low_rank_delta_survives, test_calib_option_off_matches_plain,

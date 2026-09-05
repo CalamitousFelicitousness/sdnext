@@ -27,7 +27,10 @@ formats, sets with non-factorable contributions are hosted instead: the
 families' own ``calc_updown`` delta is truncated to its top singular
 directions and appended the same way, stored at the delta's effective
 rank when the spectrum ends in a numerically null tail (dense-combined
-plain pairs, low-rank LyCORIS). Truncation keeps the dominant part
+plain pairs, low-rank LyCORIS). Hosted pairs stay resident as rowwise int8
+with fp32 scales when the sdnq build carries the factor channel, merged behind
+the full-precision pair per materialize; otherwise they join the bf16 concat.
+Truncation keeps the dominant part
 of the effect and drops an orthogonal residual, where requantize keeps
 only the grid extrema and adds grid-shift noise of the delta's own
 magnitude. When activation statistics for the checkpoint exist (see
@@ -98,6 +101,19 @@ def trim_null_tail(up_h, down_h):
         if k < up_h.shape[1]:
             return up_h[:, :k].contiguous(), down_h[:k].contiguous()
     return up_h, down_h
+
+
+channel_available: bool | None = None
+
+
+def channel_int8_available():
+    """True when the loaded sdnq dequantizer accepts the rowwise-int8 factor channel; the bf16 concat carries hosted pairs otherwise."""
+    global channel_available # pylint: disable=global-statement
+    if channel_available is None:
+        import inspect
+        from sdnq.dequantizer import SDNQDequantizer
+        channel_available = 'svd_up_q' in inspect.signature(SDNQDequantizer.__call__).parameters
+    return channel_available
 
 
 def get_module_factors(module, device, dtype, original_shape=None):
@@ -175,6 +191,8 @@ def remove_factors(self):
         svd_down = torch.nn.Parameter(svd_down.to(device=device), requires_grad=False)
     self.svd_up = svd_up
     self.svd_down = svd_down
+    if getattr(self, 'svd_up_q', None) is not None: # the checkpoint never populates the quantized channel; removal clears it
+        self.svd_up_q = self.svd_up_scale = self.svd_down_q = self.svd_down_scale = None
     del self.sdnq_lora_svd_stash
     lora_stack.drop(getattr(self, 'network_layer_name', None)) # a selection schedule must not outlive the segments it points into
     return True
@@ -259,6 +277,60 @@ def append_factors(self, ups, downs):
     return segments, deq.use_quantized_matmul
 
 
+def set_hosted_channel(self, up_q, up_s, down_q, down_s):
+    """Attach a hosted pair as the layer's rowwise-int8 factor channel; returns the stored rank.
+
+    The dequantizer dequantizes and concatenates this channel behind the
+    full-precision pair per materialize, so the effective factor set matches
+    the bf16 concat ([members | hosted]) at half the resident bytes. Entries
+    stored before tail slicing carry null ranks as exact zero columns and are
+    trimmed to the effective rank first; bucket padding dequantizes to exact zeros.
+    """
+    nz = (up_q != 0).any(dim=0)
+    if not bool(nz.all()):
+        k = max(1, int(nz.nonzero().max().item()) + 1) if bool(nz.any()) else 1
+        if k < up_q.shape[1]:
+            up_q, down_q, down_s = up_q[:, :k].contiguous(), down_q[:k].contiguous(), down_s[:k].contiguous()
+    rank = int(up_q.shape[1])
+    deq = self.sdnq_dequantizer
+    device = self.scale.device
+    if not hasattr(self, 'sdnq_lora_svd_stash'):
+        self.sdnq_lora_svd_stash = (self.svd_up, self.svd_down) # a hosted-only attach must still mark the layer for removal
+    if deq.use_quantized_matmul:
+        up_q, up_s = up_q.t().contiguous(), up_s.t().contiguous() # [r, out] with per-out scales [1, out]
+        down_q, down_s = down_q.t().contiguous(), down_s.t().contiguous() # [in, r] with per-rank scales [1, r]
+        dim_up, dim_down, s_dim = 0, 1, 1
+    else:
+        dim_up, dim_down, s_dim = 1, 0, 0
+    from sdnq.common import use_torch_compile
+    if use_torch_compile:
+        bucket = rank_bucket(up_q.shape[dim_up])
+        up_q = pad_rank(up_q, dim_up, bucket)
+        down_q = pad_rank(down_q, dim_down, bucket)
+        if down_s.shape[s_dim] < bucket: # the down scale is rank-indexed; padded rows hold zeros so any scale value works
+            shape = list(down_s.shape)
+            shape[s_dim] = bucket - down_s.shape[s_dim]
+            down_s = torch.cat([down_s, down_s.new_ones(shape)], dim=s_dim)
+    self.svd_up_q = torch.nn.Parameter(up_q.to(device=device), requires_grad=False)
+    self.svd_up_scale = torch.nn.Parameter(up_s.to(device=device, dtype=torch.float32), requires_grad=False)
+    self.svd_down_q = torch.nn.Parameter(down_q.to(device=device), requires_grad=False)
+    self.svd_down_scale = torch.nn.Parameter(down_s.to(device=device, dtype=torch.float32), requires_grad=False)
+    return rank
+
+
+def attach_hosted(self, ups, downs, up_q, up_s, down_q, down_s, dtype):
+    """Exact members ride the full-precision pair; the hosted pair rides the int8 channel when the sdnq build has one, else the whole set is one bf16 concat. Returns the hosted rank."""
+    if channel_int8_available():
+        if ups:
+            append_factors(self, ups, downs)
+        return set_hosted_channel(self, up_q, up_s, down_q, down_s)
+    up_h = lora_factor_cache.dequantize_rowwise(up_q, up_s).to(device=devices.device, dtype=dtype)
+    down_h = lora_factor_cache.dequantize_rowwise(down_q, down_s).to(device=devices.device, dtype=dtype)
+    up_h, down_h = trim_null_tail(up_h, down_h) # the int8 roundtrip zeroes the numeric tail the eps slice keeps; fresh and replayed attaches must trim alike
+    append_factors(self, ups + [up_h], downs + [down_h])
+    return int(up_h.shape[1])
+
+
 def channel_candidate(self, network_layer_name, wanted_names):
     """True when this layer can carry a set on the svd channel: quantized, covered, and given a rank to spend."""
     if not enabled():
@@ -316,11 +388,10 @@ def apply_cached(self, network_layer_name, wanted_names):
     from sdnq.quant_utils import rotate_hadamard
 
     lora_factor_cache.begin_pass(wanted_names)
-    entry = lora_factor_cache.lookup(network_layer_name)
+    entry = lora_factor_cache.lookup_raw(network_layer_name)
     if entry is None:
         return None
-    up_h, down_h, energy, calibrated, rms = entry
-    up_h, down_h = trim_null_tail(up_h, down_h)
+    up_q, up_s, down_q, down_s, energy, calibrated, rms = entry
     deq = self.sdnq_dequantizer
     dtype = deq.result_dtype
     remove_factors(self) # before the rule: the svd-channel check must see the checkpoint's own state, and a declined layer must fall through pristine
@@ -345,9 +416,8 @@ def apply_cached(self, network_layer_name, wanted_names):
         ups.append(up_eff)
         downs.append(down)
     lora_factor_cache.note_hit()
-    append_factors(self, ups + [up_h.to(device=devices.device, dtype=dtype)], downs + [down_h.to(device=devices.device, dtype=dtype)])
+    hosted_ranks.append(attach_hosted(self, ups, downs, up_q, up_s, down_q, down_s, dtype))
     hosted_layers.append((network_layer_name, energy, calibrated))
-    hosted_ranks.append(int(up_h.shape[1]))
     return True
 
 
@@ -399,7 +469,7 @@ def apply_hosted(self, network_layer_name, updown, wanted_names):
         maybe_requant = step > 0 and delta_rms / step > REQUANT_RATIO
 
     lora_factor_cache.begin_pass(wanted_names)
-    cached = lora_factor_cache.fetch(network_layer_name)
+    cached = lora_factor_cache.fetch_raw(network_layer_name)
     D = None if cached is not None else updown.detach().to(devices.device, torch.float32)
 
     ups, downs = [], []
@@ -412,25 +482,21 @@ def apply_hosted(self, network_layer_name, updown, wanted_names):
         downs.append(down)
 
     if cached is not None:
-        up_h, down_h, energy, calibrated, _cached_rms = cached
+        up_q, up_s, down_q, down_s, energy, calibrated, _cached_rms = cached
         if maybe_requant and energy < REQUANT_ENERGY:
             routed_layers.append(network_layer_name)
             return None
-        up_h, down_h = trim_null_tail(up_h, down_h)
-        append_factors(self, ups + [up_h.to(device=devices.device, dtype=dtype)], downs + [down_h.to(device=devices.device, dtype=dtype)])
+        hosted_ranks.append(attach_hosted(self, ups, downs, up_q, up_s, down_q, down_s, dtype))
         hosted_layers.append((network_layer_name, energy, calibrated))
-        hosted_ranks.append(int(up_h.shape[1]))
         return True
 
     up_h, down_h, energy, calibrated = truncate_delta(self, D, dtype)
-    up_h, down_h = lora_factor_cache.store(network_layer_name, up_h, down_h, energy, calibrated, delta_rms)
+    up_q, up_s, down_q, down_s = lora_factor_cache.store_raw(network_layer_name, up_h, down_h, energy, calibrated, delta_rms)
     if maybe_requant and energy < REQUANT_ENERGY:
         routed_layers.append(network_layer_name) # the stored entry memoizes the routing; replays skip the sketch
         return None
-    up_h, down_h = trim_null_tail(up_h, down_h) # the int8 roundtrip zeroes the numeric tail the eps slice keeps; fresh and replayed attaches must trim alike
-    append_factors(self, ups + [up_h], downs + [down_h])
+    hosted_ranks.append(attach_hosted(self, ups, downs, up_q, up_s, down_q, down_s, dtype))
     hosted_layers.append((network_layer_name, energy, calibrated))
-    hosted_ranks.append(int(up_h.shape[1]))
     return True
 
 
