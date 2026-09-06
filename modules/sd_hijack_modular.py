@@ -11,7 +11,15 @@ from modules.lora import lora_stack
 
 
 debug = os.environ.get('SD_MODULAR_DEBUG', None) is not None
+latent_dump = os.environ.get('SD_MODULAR_LATENT_DUMP', None)
 intercepted = set()
+
+
+def dump_latent(latents: torch.Tensor):
+    """Write the current step's packed latent as fp16 into the SD_MODULAR_LATENT_DUMP directory."""
+    os.makedirs(latent_dump, exist_ok=True)
+    fn = os.path.join(latent_dump, f'{shared.state.job_timestamp}-{shared.state.sampling_step:03d}.pt')
+    torch.save(latents.detach().to(device='cpu', dtype=torch.float16), fn)
 
 
 def modular_step(components: diffusers.modular_pipelines.ModularPipeline, state: diffusers.modular_pipelines.BlockState):
@@ -26,6 +34,8 @@ def modular_step(components: diffusers.modular_pipelines.ModularPipeline, state:
         else:
             shared.state.current_latent = state.latents
         lora_stack.on_step(shared.state.sampling_step)
+        if latent_dump:
+            dump_latent(state.latents)
         if debug:
             log.trace(f'Modular step: step={shared.state.sampling_step} latent={list(state.latents.shape)}')
     if shared.state.interrupted or shared.state.skipped:
