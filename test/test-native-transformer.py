@@ -53,6 +53,7 @@ modules.cmd_args.parsed, _ = modules.cmd_args.parser.parse_known_args([])
 
 from modules.errors import log                          # pylint: disable=wrong-import-position
 from pipelines import native_transformer as nt          # pylint: disable=wrong-import-position
+from modules import sd_models_utils                     # pylint: disable=wrong-import-position  # after nt: shared bootstraps the cycle
 
 
 # ============================================================
@@ -1249,23 +1250,24 @@ def test_load_raises_when_state_dict_is_empty():
 
 
 def test_load_cancel_is_not_reported_as_a_read_failure():
-    """read_state_dict returns None on cancel exactly as it does on a failed
-    read, so the guard re-checks the flag to tell the two apart."""
+    """read_state_dict raises LoadInterrupted on cancel; load must let it out
+    rather than fold it into the read failure path."""
     spec = nt.TransformerSpec(cls=MockMiniTransformer)
     orig = nt.sd_models.read_state_dict
-    orig_interrupted = nt.shared.state.interrupted
-    nt.sd_models.read_state_dict = lambda *a, **k: None
-    nt.shared.state.interrupted = True
+
+    def cancelled(*_args, **_kwargs):
+        raise sd_models_utils.LoadInterrupted('cancelled before read')
+
+    nt.sd_models.read_state_dict = cancelled
     try:
         nt.load(local_file='/tmp/cancelled.safetensors', repo_id='fake/repo', spec=spec, diffusers_cfg={},
                 quant_args={}, quant_type=None)
         raise AssertionError('expected LoadInterrupted')
-    except nt.LoadInterrupted as e:
-        assert 'interrupted' in str(e), str(e)
+    except sd_models_utils.LoadInterrupted:
+        pass
     except ValueError:
         raise AssertionError('cancel must not be reported as a read failure') from None
     finally:
-        nt.shared.state.interrupted = orig_interrupted
         nt.sd_models.read_state_dict = orig
 
 

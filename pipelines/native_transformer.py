@@ -96,16 +96,6 @@ class OverrideArchMismatch(Exception):
     """
 
 
-class LoadInterrupted(Exception):
-    """Raised when the user cancels while a native transformer load is reading.
-
-    ``read_state_dict`` returns None on interrupt exactly as it does on a read
-    failure, so the two are only separable by re-checking the flag.
-    :func:`pipelines.generic_transformer.load_transformer` catches this and
-    returns None, matching the interrupt check it already runs on entry.
-    """
-
-
 @dataclass(frozen=True)
 class SiblingSpec:
     """Describes a non-transformer component that may ship inline in the same
@@ -373,13 +363,10 @@ def load(
 def require_state_dict(state_dict: dict | None, local_file: str, type_name: str) -> None:
     """Stop the load when the file yielded no tensors.
 
-    ``read_state_dict`` logs its own failure and returns None, so the None
-    otherwise reaches the key walkers below and surfaces as an unrelated
-    AttributeError against whichever one ran first. An empty dict gets past
-    them and is only reported much later, as every key missing.
+    ``read_state_dict`` raises on a failed read, so what reaches here is a real
+    state dict. An empty one still gets past every key walker untouched and is
+    only reported much later, as every key missing.
     """
-    if shared.state.interrupted:
-        raise LoadInterrupted(f"Load model: type={type_name} native_transformer interrupted")
     if state_dict:
         return
     raise ValueError(

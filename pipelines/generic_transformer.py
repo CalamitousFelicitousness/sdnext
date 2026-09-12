@@ -1,6 +1,6 @@
 import os
 import torch
-from modules import shared, devices, errors, sd_models, sd_offload, model_quant
+from modules import shared, devices, errors, sd_models, sd_models_utils, sd_offload, model_quant
 from modules.logger import log
 from pipelines.generic_util import get_loader
 from pipelines.generic_map import transformers_map
@@ -142,7 +142,7 @@ def load_transformer(
                     quant_type=quant_type,
                     **kwargs,
                 )
-            except native_transformer.LoadInterrupted:
+            except sd_models_utils.LoadInterrupted:
                 return None
             except native_transformer.OverrideArchMismatch as e:
                 log.warning(f'Load model: transformer="{local_file}" override incompatible with cls={cls_name.__name__} ({e})')

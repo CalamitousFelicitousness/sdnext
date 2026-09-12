@@ -7,12 +7,25 @@ from rich import progress # pylint: disable=redefined-builtin
 import torch
 import safetensors.torch
 
-from modules import paths, shared, errors
+from modules import paths, shared
 from modules.logger import log, console
 from modules.sd_checkpoint import CheckpointInfo # pylint: disable=unused-import
 
 
 debug = log.trace if os.environ.get('SD_LOAD_DEBUG', None) is not None else lambda *args, **kwargs: None
+
+
+class StateDictReadError(Exception):
+    """Raised when a checkpoint file cannot be read into a state dict."""
+
+
+class LoadInterrupted(Exception):
+    """Raised when the user cancels before a checkpoint read completes.
+
+    Separate from :class:`StateDictReadError` so a cancel is never reported as
+    a broken file; callers that already treat an interrupt as a quiet stop
+    catch this and return instead of logging an error.
+    """
 
 
 class StateDictCache:
@@ -122,19 +135,22 @@ def convert_to_faketensors(tensor):
 
 
 def read_state_dict(checkpoint_file, map_location=None, what:str='model'): # pylint: disable=unused-argument
+    """Read a checkpoint into a state dict.
+
+    Raises StateDictReadError when the file cannot be read and LoadInterrupted
+    when the user cancels first, so callers never have to tell a failed read
+    apart from a state dict that happens to be empty.
+    """
     cached = state_dict_cache.get(checkpoint_file)
     if cached is not None:
         return cached
     if not os.path.isfile(checkpoint_file):
-        log.error(f'Load dict: file="{checkpoint_file}" not a file')
-        return None
+        raise StateDictReadError(f'Load dict: file="{checkpoint_file}" not a file')
     _, extension = os.path.splitext(checkpoint_file)
     if extension.lower() == ".ckpt" and shared.opts.sd_disable_ckpt:
-        log.warning(f'Load dict: file="{checkpoint_file}" checkpoint loading disabled')
-        return None
+        raise StateDictReadError(f'Load dict: file="{checkpoint_file}" checkpoint loading disabled')
     if shared.state.interrupted:
-        log.warning(f'Load dict: file="{checkpoint_file}" interrupted before read')
-        return None
+        raise LoadInterrupted(f'Load dict: file="{checkpoint_file}" interrupted before read')
     try:
         pl_sd = None
         # safetensors.torch.load_file opens its own handle by path, so wrapping
@@ -157,8 +173,8 @@ def read_state_dict(checkpoint_file, map_location=None, what:str='model'): # pyl
         state_dict_cache.set(checkpoint_file, sd)
         del pl_sd
     except Exception as e:
-        errors.display(e, f'Load model: {checkpoint_file}')
-        sd = None
+        # the cause carries the platform detail (a Windows commit failure, a short read)
+        raise StateDictReadError(f'Load dict: file="{checkpoint_file}" {e}') from e
     return sd
 
 
