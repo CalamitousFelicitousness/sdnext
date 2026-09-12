@@ -1124,16 +1124,18 @@ def try_load_chain(name, network_on_disk, lora_scale, family_loaders):
     sd_models_utils.state_dict_cache.enable()
     net = None
     mismatch = 0
-    for try_fn in family_loaders:
-        sub = try_fn(name, network_on_disk, lora_scale)
-        if sub is None:
-            continue
-        mismatch += getattr(sub, 'mismatch', 0)
-        if net is None:
-            net = sub
-        else:
-            net.modules.update(sub.modules)
-    sd_models_utils.state_dict_cache.disable()
+    try:
+        for try_fn in family_loaders:
+            sub = try_fn(name, network_on_disk, lora_scale)
+            if sub is None:
+                continue
+            mismatch += getattr(sub, 'mismatch', 0)
+            if net is None:
+                net = sub
+            else:
+                net.modules.update(sub.modules)
+    finally:
+        sd_models_utils.state_dict_cache.disable() # a raising family loader must not leave the file pinned for the process
     if net is not None and mismatch > 0: # applying only the layers that fit leaves the model in a state nothing was trained for
         log.error(f'Network load: type=LoRA name="{name}" modules={len(net.modules)} mismatch={mismatch} shapes do not match the loaded model')
         return None

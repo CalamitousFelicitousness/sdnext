@@ -16,7 +16,8 @@ debug = log.trace if os.environ.get('SD_LOAD_DEBUG', None) is not None else lamb
 
 
 class StateDictCache:
-    _enabled: bool = True
+    # off by default: only the LoRA family chain re-reads one file enough times to pay for pinning it
+    _enabled: bool = False
     _cache: dict[str, dict] = {}
 
     def get(self, key: str):
