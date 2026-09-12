@@ -1215,6 +1215,60 @@ def test_load_rejects_non_safetensors():
         assert '.safetensors' in str(e)
 
 
+def test_load_raises_when_state_dict_is_none():
+    """A failed read returns None from read_state_dict; load must name the file
+    instead of letting the None reach the key walkers."""
+    spec = nt.TransformerSpec(cls=MockMiniTransformer)
+    orig = nt.sd_models.read_state_dict
+    nt.sd_models.read_state_dict = lambda *a, **k: None
+    try:
+        nt.load(local_file='/tmp/unreadable.safetensors', repo_id='fake/repo', spec=spec, diffusers_cfg={},
+                quant_args={}, quant_type=None)
+        raise AssertionError('expected ValueError')
+    except ValueError as e:
+        assert 'unreadable.safetensors' in str(e), str(e)
+        assert 'MockMiniTransformer' in str(e), str(e)
+    finally:
+        nt.sd_models.read_state_dict = orig
+
+
+def test_load_raises_when_state_dict_is_empty():
+    """An empty dict passes every key walker untouched and is only reported much
+    later as every key missing, so the guard rejects it up front."""
+    spec = nt.TransformerSpec(cls=MockMiniTransformer)
+    orig = nt.sd_models.read_state_dict
+    nt.sd_models.read_state_dict = lambda *a, **k: {}
+    try:
+        nt.load(local_file='/tmp/empty.safetensors', repo_id='fake/repo', spec=spec, diffusers_cfg={},
+                quant_args={}, quant_type=None)
+        raise AssertionError('expected ValueError')
+    except ValueError as e:
+        assert 'empty.safetensors' in str(e), str(e)
+    finally:
+        nt.sd_models.read_state_dict = orig
+
+
+def test_load_cancel_is_not_reported_as_a_read_failure():
+    """read_state_dict returns None on cancel exactly as it does on a failed
+    read, so the guard re-checks the flag to tell the two apart."""
+    spec = nt.TransformerSpec(cls=MockMiniTransformer)
+    orig = nt.sd_models.read_state_dict
+    orig_interrupted = nt.shared.state.interrupted
+    nt.sd_models.read_state_dict = lambda *a, **k: None
+    nt.shared.state.interrupted = True
+    try:
+        nt.load(local_file='/tmp/cancelled.safetensors', repo_id='fake/repo', spec=spec, diffusers_cfg={},
+                quant_args={}, quant_type=None)
+        raise AssertionError('expected LoadInterrupted')
+    except nt.LoadInterrupted as e:
+        assert 'interrupted' in str(e), str(e)
+    except ValueError:
+        raise AssertionError('cancel must not be reported as a read failure') from None
+    finally:
+        nt.shared.state.interrupted = orig_interrupted
+        nt.sd_models.read_state_dict = orig
+
+
 def crashing_converter(sd):
     """diffusers-style layer count that blows up when the block family is
     absent, mirroring convert_chroma_..._to_diffusers on a wrong-arch file."""
@@ -2475,6 +2529,9 @@ def run_all():
         test_load_end_to_end_with_sibling_partition,
         test_load_raises_on_missing_sibling_class,
         test_load_rejects_non_safetensors,
+        test_load_raises_when_state_dict_is_none,
+        test_load_raises_when_state_dict_is_empty,
+        test_load_cancel_is_not_reported_as_a_read_failure,
         test_build_component_converter_crash_raises_mismatch,
         test_build_component_shape_mismatch_is_hard_error,
         test_load_converter_crash_raises_mismatch,

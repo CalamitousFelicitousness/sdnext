@@ -96,6 +96,16 @@ class OverrideArchMismatch(Exception):
     """
 
 
+class LoadInterrupted(Exception):
+    """Raised when the user cancels while a native transformer load is reading.
+
+    ``read_state_dict`` returns None on interrupt exactly as it does on a read
+    failure, so the two are only separable by re-checking the flag.
+    :func:`pipelines.generic_transformer.load_transformer` catches this and
+    returns None, matching the interrupt check it already runs on entry.
+    """
+
+
 @dataclass(frozen=True)
 class SiblingSpec:
     """Describes a non-transformer component that may ship inline in the same
@@ -283,6 +293,7 @@ def load(
         quant_type = model_quant.get_quant_type(quant_args)
 
     state_dict = sd_models.read_state_dict(local_file, what="transformer")
+    require_state_dict(state_dict, local_file, spec.cls.__name__)
     metadata_layers = read_quantization_metadata(local_file)
     state_dict = drop_companion_keys(state_dict, spec.ignored_prefixes, spec.cls.__name__)
     state_dict, detected_prefix = strip_prefix(state_dict, spec.prefixes, spec.cls.__name__)
@@ -357,6 +368,24 @@ def load(
     devices.torch_gc()
     log.debug(f"Load model: type={spec.cls.__name__} native_transformer time={time.time() - t0:.2f}")
     return transformer, loaded_siblings
+
+
+def require_state_dict(state_dict: dict | None, local_file: str, type_name: str) -> None:
+    """Stop the load when the file yielded no tensors.
+
+    ``read_state_dict`` logs its own failure and returns None, so the None
+    otherwise reaches the key walkers below and surfaces as an unrelated
+    AttributeError against whichever one ran first. An empty dict gets past
+    them and is only reported much later, as every key missing.
+    """
+    if shared.state.interrupted:
+        raise LoadInterrupted(f"Load model: type={type_name} native_transformer interrupted")
+    if state_dict:
+        return
+    raise ValueError(
+        f"Load model: type={type_name} native_transformer read no tensors "
+        f'from "{local_file}"'
+    )
 
 
 def drop_companion_keys(state_dict: dict, ignored_prefixes: tuple[str, ...], type_name: str) -> dict:

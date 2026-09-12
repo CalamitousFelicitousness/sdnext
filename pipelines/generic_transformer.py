@@ -142,6 +142,8 @@ def load_transformer(
                     quant_type=quant_type,
                     **kwargs,
                 )
+            except native_transformer.LoadInterrupted:
+                return None
             except native_transformer.OverrideArchMismatch as e:
                 log.warning(f'Load model: transformer="{local_file}" override incompatible with cls={cls_name.__name__} ({e})')
                 if fallback:
